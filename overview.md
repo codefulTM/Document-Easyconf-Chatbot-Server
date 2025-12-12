@@ -76,8 +76,6 @@ Tài liệu này mô tả chi tiết các file liên quan đến chức năng cr
   - Cân bằng tải giữa các API key
   - Xử lý rate limiting và retry
 
--- here --
-
 ### `src/services/geminiApi.service.ts`
 
 - **Mục đích**: Xử lý tương tác với Gemini API
@@ -85,6 +83,8 @@ Tài liệu này mô tả chi tiết các file liên quan đến chức năng cr
   - Gửi request đến Gemini API
   - Xử lý response và lỗi
   - Cache kết quả khi cần thiết
+
+-- Bắt đầu từ vị trí này, nội dung doc cho các file được viết hoàn toàn bằng AI mà không có sự can thiệp của con người --
 
 ### `src/services/playwright.service.ts`
 
