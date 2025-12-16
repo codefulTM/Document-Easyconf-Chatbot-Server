@@ -127,6 +127,8 @@ Tài liệu này mô tả chi tiết các file liên quan đến chức năng cr
   - Phân phối xử lý đồng thời
   - Tổng hợp kết quả
 
+-- here --
+
 ### `src/services/conferenceProcessor.service.ts`
 
 - **Mục đích**: Xử lý dữ liệu hội nghị
