@@ -127,8 +127,6 @@ Tài liệu này mô tả chi tiết các file liên quan đến chức năng cr
   - Phân phối xử lý đồng thời
   - Tổng hợp kết quả
 
--- here --
-
 ### `src/services/conferenceProcessor.service.ts`
 
 - **Mục đích**: Xử lý dữ liệu hội nghị
@@ -136,6 +134,8 @@ Tài liệu này mô tả chi tiết các file liên quan đến chức năng cr
   - Phân tích thông tin hội nghị
   - Trích xuất các trường dữ liệu quan trọng
   - Chuẩn hóa định dạng dữ liệu
+
+-- here --
 
 ### `src/services/batchProcessing/conferenceDetermination.service.ts`
 
@@ -609,3 +609,146 @@ Tài liệu này mô tả chi tiết các file liên quan đến chức năng cr
   - Chạy kiểm thử tự động
   - Triển khai tự động
   - Kiểm tra chất lượng mã nguồn
+
+## 21. Sơ đồ kiến trúc hệ thống
+
+```mermaid
+graph TD
+    subgraph "Input & Routing"
+        A1[api/v1/crawl/crawl.routes.ts] --> A2(api/v1/crawl/crawl.controller.ts);
+    end
+
+    subgraph "Configuration & Definitions"
+        style B1 fill:#f9f,stroke:#333,stroke-width:2px
+        style B2 fill:#f9f,stroke:#333,stroke-width:2px
+        style B3 fill:#f9f,stroke:#333,stroke-width:2px
+        B1[config/crawl.config.ts];
+        B2[types/crawl/crawl.types.ts];
+        B3[types/crawl/geminiApi.types.ts];
+    end
+
+    subgraph "Core Services & Orchestration"
+        C1(crawlOrchestrator.service.ts);
+        C2(taskQueue.service.ts);
+        C3(crawlProcessManager.service.ts);
+        C4(batchProcessingOrchestrator.service.ts);
+        C5(globalConcurrencyManager.service.ts);
+    end
+
+    subgraph "Execution & External Interaction"
+        D1[playwright.service.ts];
+        D2(googleSearch.service.ts);
+        D3(geminiApiOrchestrator.service.ts) --> D4(geminiApi.service.ts);
+        D5[proxyManager.service.ts];
+        D6[sessionManager.service.ts];
+    end
+    
+    subgraph "Data Processing Pipeline (Batch)"
+        E1(conferenceDetermination.service.ts) --> E2(conferenceLinkProcessor.service.ts);
+        E2 --> E3(pageContentExtractor.service.ts);
+        E3 --> E4(domTransformation.service.ts);
+        E3 --> E5(pdfExtractor.service.ts);
+        E3 --> D3;
+        E3 --> E9(frameTextExtractor.service.ts)
+        D3 --> E6(finalExtractionApi.service.ts);
+        E6 --> E7(conferenceDataAggregator.service.ts);
+        E7 --> E8(finalRecordAppender.service.ts);
+    end
+
+    subgraph "Persistence & Finalization"
+        F1[databasePersistence.service.ts];
+        F2[htmlPersistence.service.ts];
+        F3[fileSystem.service.ts];
+        F4(resultProcessing.service.ts);
+        F5(inMemoryResultCollector.service.ts)
+    end
+
+    subgraph "Utilities"
+        style G1 fill:#ccf,stroke:#333,stroke-width:2px
+        style G2 fill:#ccf,stroke:#333,stroke-width:2px
+        G1[utils/crawl/domProcessing.ts];
+        G2[utils/crawl/url.utils.ts];
+    end
+
+    subgraph "Jobs & Standalone Scripts"
+        H1[jobs/conferenceLogAnalysis.job.ts];
+        H2[conference/3_core_portal_scraping.ts];
+        H3[journal/crawlJournals.ts];
+    end
+
+    %% Define Relationships
+    A2 -- "1. Initiates Crawl" --> C1;
+    
+    C1 -- "Uses for queuing" --> C2;
+    C1 -- "Manages processes with" --> C3;
+    C1 -- "Starts batch orchestrator" --> C4;
+    C1 -- "Manages global concurrency" --> C5;
+    C1 -- "Reads config from" --> B1;
+    
+    C3 -- "Runs browser via" --> D1;
+    D1 -- "Can use proxy from" --> D5;
+    D1 -- "Can use session from" --> D6;
+    D1 -- "Saves raw page via" --> F2;
+
+    C4 -- "2. Starts pipeline with" --> E1;
+    E1 -- "Finds conferences via" --> D2;
+    
+    E3 -- "Uses utility" --> G1;
+    E4 -- "Uses utility" --> G1;
+    
+    E8 -- "3. Sends final data to" --> F4;
+    F4 -- "Collects data from" --> F5;
+    F4 -- "4. Saves record to DB via" --> F1;
+    F2 -- "Uses" --> F3;
+
+    F1 -- "Is later analyzed by" --> H1;
+```
+
+### Chú thích luồng xử lý chi tiết (Phiên bản đầy đủ)
+
+Sơ đồ trên mô tả một kiến trúc toàn diện của hệ thống crawl. Luồng hoạt động có thể được chia thành các giai đoạn chính sau:
+
+**Giai đoạn 1: Khởi tạo và Điều phối**
+
+1.  **API-Driven Initiation**: Luồng xử lý bắt đầu tại `crawl.routes.ts`, nơi định nghĩa endpoint API. Khi có request, `crawl.controller.ts` tiếp nhận và gọi `crawlOrchestrator.service.ts` để khởi tạo một phiên crawl.
+2.  **Core Orchestration**: `crawlOrchestrator.service.ts` là bộ não của hệ thống, chịu trách nhiệm:
+    *   Sử dụng `taskQueue.service.ts` và `globalConcurrencyManager.service.ts` để quản lý hàng đợi và số lượng tác vụ chạy song song.
+    *   Dùng `crawlProcessManager.service.ts` để tạo và quản lý các tiến trình con (worker), mỗi tiến trình chạy một instance của trình duyệt headless `playwright.service.ts`.
+    *   Kích hoạt `batchProcessingOrchestrator.service.ts` để bắt đầu chuỗi xử lý dữ liệu chính.
+    *   Đọc các cấu hình từ `crawl.config.ts`.
+
+**Giai đoạn 2: Thực thi và Xử lý dữ liệu (Pipeline)**
+
+Đây là chuỗi các bước xử lý dữ liệu được điều phối bởi `batchProcessingOrchestrator.service.ts`:
+
+3.  **Tìm kiếm và Xác định (Determination)**:
+    *   `conferenceDetermination.service.ts` sử dụng `googleSearch.service.ts` để tìm kiếm các trang web hội nghị tiềm năng.
+    *   Sau khi xác định được trang chủ, nó chuyển giao cho bước tiếp theo.
+4.  **Trích xuất Nội dung thô (Content Extraction)**:
+    *   `conferenceLinkProcessor.service.ts` nhận URL trang chủ, dùng `playwright.service.ts` để duyệt trang và tìm các liên kết con quan trọng.
+    *   `pageContentExtractor.service.ts` được gọi để lấy nội dung text từ các trang này. Nó có khả năng:
+        *   Xử lý DOM, biến đổi HTML bằng `domTransformation.service.ts`.
+        *   Trích xuất text từ `iframe` bằng `frameTextExtractor.service.ts`.
+        *   Trích xuất nội dung từ file PDF bằng `pdfExtractor.service.ts`.
+5.  **Phân tích bằng AI (AI Analysis)**:
+    *   Nội dung text thô được đưa đến `geminiApiOrchestrator.service.ts`.
+    *   Service này quản lý việc gọi đến `geminiApi.service.ts` để thực hiện các tác vụ như tóm tắt, phân loại, và trích xuất thông tin có cấu trúc bằng mô hình ngôn ngữ lớn.
+6.  **Trích xuất và Tổng hợp (Final Extraction & Aggregation)**:
+    *   `finalExtractionApi.service.ts` nhận kết quả từ AI và trích xuất ra các trường dữ liệu cuối cùng (tên hội nghị, ngày, địa điểm,...).
+    *   `conferenceDataAggregator.service.ts` tổng hợp dữ liệu từ nhiều nguồn khác nhau để tạo ra một bản ghi thống nhất.
+
+**Giai đoạn 3: Hoàn tất và Lưu trữ**
+
+7.  **Finalization**: `finalRecordAppender.service.ts` gửi bản ghi thống nhất đến `resultProcessing.service.ts`.
+8.  **Persistence**:
+    *   `resultProcessing.service.ts` thu thập tất cả kết quả từ `inMemoryResultCollector.service.ts` và thực hiện các bước xử lý cuối cùng.
+    *   Cuối cùng, nó gọi `databasePersistence.service.ts` để lưu bản ghi hoàn chỉnh vào cơ sở dữ liệu.
+    *   Song song đó, `htmlPersistence.service.ts` (sử dụng `fileSystem.service.ts`) lưu lại mã HTML của các trang đã crawl để phục vụ việc gỡ lỗi.
+
+**Các thành phần khác:**
+
+*   **Utilities**: Các file trong `utils/` cung cấp các hàm tiện ích tái sử dụng, ví dụ như `domProcessing.ts` cho việc xử lý DOM.
+*   **Configuration & Definitions**: Các file trong `config/` và `types/` định nghĩa cấu trúc dữ liệu và các tham số cấu hình, đảm bảo tính nhất quán và dễ bảo trì.
+*   **Jobs & Standalone Scripts**:
+    *   `conferenceLogAnalysis.job.ts`: Một tác vụ chạy nền, định kỳ phân tích dữ liệu đã được lưu trong DB để tạo báo cáo hoặc insights.
+    *   `3_core_portal_scraping.ts`, `crawlJournals.ts`: Là các script độc lập có thể được chạy để thực hiện các tác vụ crawl chuyên biệt.
