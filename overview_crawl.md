@@ -696,15 +696,16 @@ graph TD
     E3 -- "Uses utility" --> G1;
     E4 -- "Uses utility" --> G1;
     
-    E8 -- "3. Sends final data to" --> F4;
-    F4 -- "Collects data from" --> F5;
-    F4 -- "4. Saves record to DB via" --> F1;
+    E8 -- "3a. Appends final record to" --> F5;
+    C1 -- "4. Triggers final processing" --> F4;
+    F5 -- "3b. Is read by" --> F4;
+    F4 -- "5. Saves batch to DB via" --> F1;
     F2 -- "Uses" --> F3;
 
     F1 -- "Is later analyzed by" --> H1;
 ```
 
-### Chú thích luồng xử lý chi tiết (Phiên bản đầy đủ)
+### Chú thích luồng xử lý chi tiết (Phiên bản đã điều chỉnh)
 
 Sơ đồ trên mô tả một kiến trúc toàn diện của hệ thống crawl. Luồng hoạt động có thể được chia thành các giai đoạn chính sau:
 
@@ -719,36 +720,25 @@ Sơ đồ trên mô tả một kiến trúc toàn diện của hệ thống craw
 
 **Giai đoạn 2: Thực thi và Xử lý dữ liệu (Pipeline)**
 
-Đây là chuỗi các bước xử lý dữ liệu được điều phối bởi `batchProcessingOrchestrator.service.ts`:
+Đây là chuỗi các bước xử lý dữ liệu được điều phối bởi `batchProcessingOrchestrator.service.ts`, lặp lại cho mỗi mục trong hàng đợi:
 
-3.  **Tìm kiếm và Xác định (Determination)**:
-    *   `conferenceDetermination.service.ts` sử dụng `googleSearch.service.ts` để tìm kiếm các trang web hội nghị tiềm năng.
-    *   Sau khi xác định được trang chủ, nó chuyển giao cho bước tiếp theo.
-4.  **Trích xuất Nội dung thô (Content Extraction)**:
-    *   `conferenceLinkProcessor.service.ts` nhận URL trang chủ, dùng `playwright.service.ts` để duyệt trang và tìm các liên kết con quan trọng.
-    *   `pageContentExtractor.service.ts` được gọi để lấy nội dung text từ các trang này. Nó có khả năng:
-        *   Xử lý DOM, biến đổi HTML bằng `domTransformation.service.ts`.
-        *   Trích xuất text từ `iframe` bằng `frameTextExtractor.service.ts`.
-        *   Trích xuất nội dung từ file PDF bằng `pdfExtractor.service.ts`.
-5.  **Phân tích bằng AI (AI Analysis)**:
-    *   Nội dung text thô được đưa đến `geminiApiOrchestrator.service.ts`.
-    *   Service này quản lý việc gọi đến `geminiApi.service.ts` để thực hiện các tác vụ như tóm tắt, phân loại, và trích xuất thông tin có cấu trúc bằng mô hình ngôn ngữ lớn.
-6.  **Trích xuất và Tổng hợp (Final Extraction & Aggregation)**:
-    *   `finalExtractionApi.service.ts` nhận kết quả từ AI và trích xuất ra các trường dữ liệu cuối cùng (tên hội nghị, ngày, địa điểm,...).
-    *   `conferenceDataAggregator.service.ts` tổng hợp dữ liệu từ nhiều nguồn khác nhau để tạo ra một bản ghi thống nhất.
+*   **Tìm kiếm và Xác định (Determination)**: `conferenceDetermination.service.ts` sử dụng `googleSearch.service.ts` để tìm kiếm và xác định trang web chính thức của hội nghị.
+*   **Trích xuất Nội dung thô (Content Extraction)**: `conferenceLinkProcessor.service.ts` và `pageContentExtractor.service.ts` làm việc cùng nhau để duyệt trang, tìm các liên kết quan trọng, và trích xuất nội dung text từ HTML (sử dụng `domTransformation.service.ts`), PDF (`pdfExtractor.service.ts`), hoặc `iframe` (`frameTextExtractor.service.ts`).
+*   **Phân tích bằng AI (AI Analysis)**: Nội dung text thô được đưa đến `geminiApiOrchestrator.service.ts` để phân tích và nhận dạng thông tin bằng mô hình ngôn ngữ lớn.
+*   **Trích xuất và Tổng hợp (Final Extraction & Aggregation)**: `finalExtractionApi.service.ts` trích xuất dữ liệu có cấu trúc từ kết quả của AI, và `conferenceDataAggregator.service.ts` tổng hợp các mảnh dữ liệu lại thành một bản ghi hội nghị thống nhất.
 
-**Giai đoạn 3: Hoàn tất và Lưu trữ**
+**Giai đoạn 3: Thu thập, Hoàn tất và Lưu trữ**
 
-7.  **Finalization**: `finalRecordAppender.service.ts` gửi bản ghi thống nhất đến `resultProcessing.service.ts`.
-8.  **Persistence**:
-    *   `resultProcessing.service.ts` thu thập tất cả kết quả từ `inMemoryResultCollector.service.ts` và thực hiện các bước xử lý cuối cùng.
-    *   Cuối cùng, nó gọi `databasePersistence.service.ts` để lưu bản ghi hoàn chỉnh vào cơ sở dữ liệu.
-    *   Song song đó, `htmlPersistence.service.ts` (sử dụng `fileSystem.service.ts`) lưu lại mã HTML của các trang đã crawl để phục vụ việc gỡ lỗi.
+3.  **Thu thập kết quả (Result Collection)**:
+    *   **(3a)** `finalRecordAppender.service.ts` nhận bản ghi đã được tổng hợp hoàn chỉnh và **ghi nó vào kho chứa tạm** `inMemoryResultCollector.service.ts`. Quá trình này lặp lại cho mỗi hội nghị được xử lý.
+4.  **Xử lý cuối cùng (Final Processing)**:
+    *   **(4)** Sau khi tất cả các task trong hàng đợi đã chạy xong, `crawlOrchestrator.service.ts` sẽ kích hoạt `resultProcessing.service.ts` để bắt đầu giai đoạn cuối.
+    *   **(3b)** `resultProcessing.service.ts` **đọc toàn bộ dữ liệu** đã được thu thập từ `inMemoryResultCollector.service.ts`.
+5.  **Lưu trữ vĩnh viễn (Persistence)**:
+    *   **(5)** `resultProcessing.service.ts` thực hiện các chuyển đổi cuối cùng (nếu cần) và gọi `databasePersistence.service.ts` để **lưu toàn bộ lô dữ liệu** xuống cơ sở dữ liệu.
 
 **Các thành phần khác:**
 
-*   **Utilities**: Các file trong `utils/` cung cấp các hàm tiện ích tái sử dụng, ví dụ như `domProcessing.ts` cho việc xử lý DOM.
-*   **Configuration & Definitions**: Các file trong `config/` và `types/` định nghĩa cấu trúc dữ liệu và các tham số cấu hình, đảm bảo tính nhất quán và dễ bảo trì.
-*   **Jobs & Standalone Scripts**:
-    *   `conferenceLogAnalysis.job.ts`: Một tác vụ chạy nền, định kỳ phân tích dữ liệu đã được lưu trong DB để tạo báo cáo hoặc insights.
-    *   `3_core_portal_scraping.ts`, `crawlJournals.ts`: Là các script độc lập có thể được chạy để thực hiện các tác vụ crawl chuyên biệt.
+*   **Utilities**: Các file trong `utils/` cung cấp các hàm tiện ích tái sử dụng.
+*   **Configuration & Definitions**: Các file trong `config/` và `types/` định nghĩa cấu trúc dữ liệu và các tham số cấu hình.
+*   **Jobs & Standalone Scripts**: Các tác vụ chạy nền hoặc độc lập như `conferenceLogAnalysis.job.ts` để phân tích dữ liệu đã có trong CSDL.
