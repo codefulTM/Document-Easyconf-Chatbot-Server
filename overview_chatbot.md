@@ -7,17 +7,27 @@ Tài liệu này mô tả chi tiết các file và thư mục liên quan đến 
 Nhóm này xử lý các yêu cầu HTTP ban đầu liên quan đến chatbot.
 
 ### `src/api/v1/chatbot/chat.routes.ts`
+
 - **Mục đích**: Định nghĩa các API endpoint cho chức năng chatbot.
 - **Chức năng chính**:
-  - Đăng ký các route như `/v1/chatbot/send`, `/v1/chatbot/history`.
+  - Đăng ký các route:
+    - `POST /upload-files`: Tải lên file đính kèm (tối đa 5 file, mỗi file tối đa 50MB)
+    - `POST /feedback`: Gửi phản hồi từ người dùng
   - Áp dụng các middleware cần thiết cho việc xác thực và validate request.
   - Liên kết các route với `chat.controller.ts`.
 
 ### `src/api/v1/chatbot/chat.controller.ts`
+
 - **Mục đích**: Xử lý logic cho các yêu cầu HTTP đến chatbot.
 - **Chức năng chính**:
-  - Nhận các yêu cầu từ client (ví dụ: gửi tin nhắn mới).
-  - Gọi đến các service hoặc handler tương ứng để xử lý yêu cầu.
+  - Xử lý upload file:
+    - Kiểm tra kích thước và số lượng file
+    - Chuyển tiếp file lên Google Cloud Storage
+    - Trả về thông tin file đã upload
+  - Xử lý phản hồi từ người dùng:
+    - Lưu trữ đánh giá và phản hồi
+    - Ghi nhận phản hồi để cải thiện chất lượng dịch vụ
+  - Ghi log và xử lý lỗi
   - Trả về phản hồi HTTP cho client.
 
 ## 2. Giao tiếp Real-time (Socket Communication)
@@ -25,12 +35,14 @@ Nhóm này xử lý các yêu cầu HTTP ban đầu liên quan đến chatbot.
 Nhóm này quản lý việc giao tiếp hai chiều, real-time giữa server và client, rất quan trọng cho trải nghiệm chatbot mượt mà.
 
 ### `src/socket/handlers/connection.handlers.ts`
+
 - **Mục đích**: Quản lý các sự kiện kết nối và ngắt kết nối của client qua Socket.IO.
 - **Chức năng chính**:
   - Xử lý khi một người dùng mới kết nối.
   - Dọn dẹp tài nguyên khi người dùng ngắt kết nối.
 
 ### `src/socket/handlers/conversation.handler.ts`
+
 - **Mục đích**: Xử lý các sự kiện liên quan đến một phiên hội thoại hoàn chỉnh.
 - **Chức năng chính**:
   - Bắt đầu một cuộc hội thoại mới.
@@ -38,6 +50,7 @@ Nhóm này quản lý việc giao tiếp hai chiều, real-time giữa server v�
   - Kết thúc một cuộc hội thoại.
 
 ### `src/socket/handlers/message.handler.ts`
+
 - **Mục đích**: Xử lý các tin nhắn được gửi đi và nhận về trong thời gian thực.
 - **Chức năng chính**:
   - Nhận tin nhắn từ người dùng.
@@ -53,10 +66,12 @@ Nhóm này quản lý việc giao tiếp hai chiều, real-time giữa server v�
 Các file này có vai trò điều phối, quyết định luồng hoạt động của chatbot.
 
 - **`src/chatbot/handlers/intentHandler.orchestrator.ts`**:
+
   - **Mục đích**: "Bộ não" trung tâm, xác định ý định (intent) của người dùng.
   - **Chức năng chính**: Phân tích tin nhắn của người dùng và quyết định xem người dùng muốn làm gì (hỏi thông tin, chào hỏi, yêu cầu chức năng...), từ đó gọi đến các `handler` chuyên biệt khác.
 
 - **`src/chatbot/handlers/hostAgent.streaming.handler.ts` / `hostAgent.nonStreaming.handler.ts`**:
+
   - **Mục đích**: Đóng vai trò là "Agent chính", quản lý các câu trả lời phức tạp hoặc cần nhiều bước.
   - **Chức năng chính**: Điều phối các `subAgent` để thu thập thông tin và tổng hợp lại câu trả lời cuối cùng. Nó cũng là nơi nạp `systemInstruction` từ `languageConfig.ts` để truyền vào `gemini.ts`. Có hai phiên bản: streaming (trả về từng phần) và non-streaming (trả về toàn bộ).
 
@@ -69,6 +84,7 @@ Các file này có vai trò điều phối, quyết định luồng hoạt độ
 Các `handler` trong `src/chatbot/handlers/` và các `service` tương ứng trong `src/chatbot/services/` chịu trách nhiệm thực thi các chức năng cụ thể mà chatbot có thể làm.
 
 - **`.../handlers/getConferences.handler.ts` và `.../services/getConferences.service.ts`**:
+
   - **Mục đích**: Cung cấp chức năng tìm kiếm thông tin hội nghị.
   - **Chức năng chính**: Tương tác với cơ sở dữ liệu hoặc các service khác để truy vấn và trả về danh sách/thông tin các hội nghị theo yêu cầu của người dùng.
 
@@ -77,6 +93,7 @@ Các `handler` trong `src/chatbot/handlers/` và các `service` tương ứng tr
 ### 3.3. Dịch vụ lõi của Chatbot
 
 - **`src/chatbot/services/conversationHistory.service.ts`**:
+
   - **Mục đích**: Quản lý lịch sử hội thoại.
   - **Chức năng chính**: Lưu và truy xuất các tin nhắn trong quá khứ để duy trì ngữ cảnh cho chatbot.
 
@@ -90,10 +107,12 @@ Nhóm này chịu trách nhiệm trực tiếp cho việc tương tác với mô
 ### 4.1. Nguồn kiến thức và Cấu hình Ngôn ngữ
 
 - **`src/chatbot/language/instructions/*.ts`**:
+
   - **Mục đích**: Chứa các file TypeScript định nghĩa **prompt hệ thống (system prompt)** cho từng ngôn ngữ (ví dụ: `english.ts`, `vietnamese.ts`).
   - **Chức năng chính**: Các file này xuất ra các biến chuỗi (template string) chứa toàn bộ vai trò, ngữ cảnh, và kiến thức nền cho chatbot. Đây là nguồn kiến thức gốc thay vì file `instruction.txt`.
 
 - **`src/chatbot/language/index.ts`**:
+
   - **Mục đích**: Tập hợp và xuất (export) tất cả các prompt hệ thống và khai báo hàm từ các file trong thư mục `instructions` và `functions`.
   - **Chức năng chính**: Đóng vai trò là một điểm truy cập duy nhất (`LangData`) cho `languageConfig.ts`.
 
@@ -104,10 +123,12 @@ Nhóm này chịu trách nhiệm trực tiếp cho việc tương tác với mô
 ### 4.2. Giao tiếp với API
 
 - **`src/chatbot/gemini/gemini.ts`**:
+
   - **Mục đích**: Là cầu nối giao tiếp trực tiếp với Google Gemini API.
   - **Chức năng chính**: Nhận `systemInstruction` (đã được xử lý bởi `languageConfig.ts`), lịch sử hội thoại, và tin nhắn mới của người dùng để gửi đến Gemini. Nó không tự đọc file mà chỉ nhận nội dung prompt đã được chuẩn bị sẵn.
 
 - **`src/chatbot/gemini/functionRegistry.ts`**:
+
   - **Mục đích**: Đăng ký các "hàm" mà mô hình AI có thể yêu cầu thực thi.
   - **Chức năng chính**: Tạo một danh sách các công cụ (tools) mà AI có thể sử dụng.
 
@@ -119,10 +140,12 @@ Nhóm này chịu trách nhiệm trực tiếp cho việc tương tác với mô
 Thư mục `src/chatbot/utils/` chứa các file hỗ trợ quan trọng cho luồng hoạt động của chatbot.
 
 - **`src/chatbot/utils/confirmationManager.ts`**:
+
   - **Mục đích**: Quản lý việc xác nhận từ người dùng trước khi thực hiện các hành động quan trọng.
   - **Chức năng chính**: Xử lý các luồng hỏi-đáp như "Bạn có chắc muốn thực hiện hành động X không?" và chờ phản hồi từ người dùng.
 
 - **`src/chatbot/utils/transformData.ts`**:
+
   - **Mục đích**: Chuyển đổi và định dạng dữ liệu.
   - **Chức năng chính**: Dùng để biến đổi cấu trúc dữ liệu nhận từ các service thành một định dạng phù hợp để hiển thị cho người dùng cuối.
 
@@ -133,14 +156,17 @@ Thư mục `src/chatbot/utils/` chứa các file hỗ trợ quan trọng cho lu�
 ## 6. Dịch vụ hỗ trợ & dùng chung (Supporting & Shared Services)
 
 - **`src/services/chatbotAnalysis.service.ts`**:
+
   - **Mục đích**: Thực hiện các phân tích sâu hơn về cuộc hội thoại.
   - **Chức năng chính**: Có thể được dùng để phân tích cảm xúc, tóm tắt cuộc hội thoại, hoặc các tác vụ AI/ML khác.
 
 - **`src/services/fileSystem.service.ts`**:
+
   - **Mục đích**: Cung cấp giao diện để tương tác với hệ thống file.
   - **Chức năng chính (đối với chatbot)**: Mặc dù không trực tiếp tải prompt, service này có thể được **các công cụ (tools)** của chatbot sử dụng. Ví dụ, một công cụ cho phép chatbot đọc/ghi file tạm để xử lý dữ liệu theo yêu cầu của người dùng.
 
 - **`src/services/databasePersistence.service.ts`**:
+
   - **Mục đích**: Giao tiếp với cơ sở dữ liệu.
   - **Chức năng chính (đối với chatbot)**: Được `conversationHistory.service.ts` sử dụng để lưu/tải lịch sử chat, và được các service chức năng (`getConferences.service.ts`) dùng để truy vấn dữ liệu.
 
@@ -221,7 +247,7 @@ graph TD
     K -- "13. Chọn và thực thi tool" --> P
     M -- "14. Gọi service tương ứng" --> N
     N -- "15. Lấy dữ liệu từ DB" --> D
-    
+
     subgraph Data Flow Back
         N -- "16. Trả dữ liệu về" --> M
         M -- "17. Trả kết quả về" --> K
@@ -229,7 +255,7 @@ graph TD
         P -- "17. Trả kết quả về" --> K
         K -- "18. Gói kết quả trong FunctionResponse" --> G
     end
-    
+
     G -- "19. Tổng hợp kết quả & trả lời hoặc gọi lại AI" --> H
     G -- "20. Stream câu trả lời cuối cùng" --> C
     C -- "21. Gửi `chat_update` về" --> B
