@@ -52,7 +52,6 @@ Ghi chú kỹ thuật: code sử dụng indexing tuyến tính để trích giá
   - Gọi `await EmbeddingService.getInstance().init()` để đảm bảo pipeline embedding sẵn sàng trước khi thêm hoặc tìm kiếm vectors.
   - Nếu collection `conference_vectors` chưa tồn tại, tạo với cấu hình vectors `{ size: this.dimension, distance: 'Cosine' }`.
   - Nếu tồn tại, in ra số lượng points hiện có.
-  - Nếu tồn tại, in ra số lượng points hiện có.
 
 ### addDocuments(chunks: Chunk[], embeddings?: number[][]): Promise<void>
 
@@ -63,7 +62,7 @@ Ghi chú kỹ thuật: code sử dụng indexing tuyến tính để trích giá
     `${recordIdStr}:${chunkIndex}`,
     recordIdStr
   )` — tức dùng `recordId` làm namespace để tạo UUIDv5. (Lưu ý: nếu `recordId` trống, dùng string "unknown".)
-  - Tạo payload gồm `content`, `source`, `chunkIndex`, `timestamp`, `recordId`, `tableName`.
+  - Tạo payload(metadata gắn kèm với mỗi vector) gồm `content`, `source`, `chunkIndex`, `timestamp`, `recordId`, `tableName`.
   - Upsert vào Qdrant theo batch (mỗi batch size = 100).
 
 Lưu ý: nếu muốn dùng embedding đã có sẵn (được truyền vào `embeddings`), hiện tại mã không sử dụng tham số đó — có thể cải thiện để chấp nhận embedding sẵn.
@@ -82,7 +81,7 @@ Lưu ý: nếu muốn dùng embedding đã có sẵn (được truyền vào `em
 
 ### scrollBatch(offset: number, limit: number): Promise<Chunk[]>
 
-- Sử dụng API `scroll` của Qdrant để lấy points không kèm vector, phù hợp cho các tác vụ keyword hoặc export.
+- Sử dụng API `scroll` của Qdrant để lấy points không kèm vector, phù hợp cho các tác vụ keyword hoặc export. `scroll` là thao tác duyệt một phần các điểm trong collection của Qdrant theo từng lô.
 
 ### hasTextSearchCapability(), textSearch(...) (placeholder)
 
