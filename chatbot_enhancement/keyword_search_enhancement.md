@@ -11,6 +11,7 @@
     - Bên cạnh đó, cũng không thể nào kiên nhẫn quét hết toàn bộ batch được, mà sẽ có limit số batch để kiểm tra keyword -> Có thể bỏ qua các chunk có chứa keyword nếu chúng nằm ngoài số batch được kiểm tra
 
 # Giải pháp đề xuất
+## Giải pháp đề xuất 1: Sử dụng search engine bên ngoài để hỗ trợ tìm kiếm keyword
 - Bởi vì Qdrant không hỗ trợ tìm kiếm theo keyword, nên ta sẽ cần sự hỗ trợ của một search engine bên ngoài. Ở đây, chúng em đề xuất sử dụng Elasticsearch.
 - Giới thiệu ngắn về Elasticsearch:
     - Elasticsearch là một công cụ tìm kiếm và phân tích dữ liệu mã nguồn mở, xây dựng trên Lucene.
@@ -20,11 +21,26 @@
     - Dễ dàng mở rộng theo cụm (scale horizontally) nên phù hợp với lượng dữ liệu lớn.
     - Trong giải pháp của chúng ta, Elasticsearch sẽ index nội dung của các chunk để nhanh chóng tìm ra những chunk có chứa keyword trước khi truy vấn xuống vector database.
 
-- Luồng keyword search mới như sau:
     - Khi vector hóa một chunk và lưu vào vector database, Elasticsearch sẽ lưu trữ dữ liệu gồm:
         - Document id
         - Chunk id
         - Nội dung chunk
     - Truyền query của người dùng vào Elasticsearch để tìm kiếm các document có chứa keyword
     - Từ các document tìm được, lấy ra các chunk tương ứng dựa vào chunk id
+    - Truy vấn các chunk này trong vector database để lấy embedding và thực hiện các bước tiếp theo như bình thường
+
+## Giải pháp đề xuất 2: Sủ dụng PostgreSQL để hỗ trợ tìm kiếm keyword
+- Bởi vì Elasticsearch ngốn khá nhiều RAM, nên chúng em đề xuất một giải pháp thay thế nhẹ nhàng hơn là sử dụng PostgreSQL(hiện tại backend của Easyconf đang sử dụng PostgreSQL).
+- Giới thiệu ngắn về PostgreSQL:
+    - PostgreSQL là một hệ quản trị cơ sở dữ liệu quan hệ mã nguồn mở, mạnh mẽ và có khả năng mở rộng cao.
+    - Hỗ trợ lưu trữ dữ liệu dưới dạng bảng với các cột và hàng, cho phép truy vấn dữ liệu bằng ngôn ngữ SQL.
+    - Hỗ trợ tìm kiếm full-text thông qua các chỉ mục tsvector và tsquery, giúp thực hiện các truy vấn tìm kiếm văn bản nhanh chóng và hiệu quả.
+    - Hỗ trợ fuzzy search thông qua các extension như pg_trgm, cho phép tìm kiếm các từ gần giống với từ khóa truy vấn, rất hữu ích khi người dùng gõ sai chính tả hoặc có nhiều biến thể của từ khóa. pg_trgm sử dụng trigram để đo lường độ tương đồng giữa các chuỗi ký tự.
+
+- Trong giải pháp của chúng ta, PostgreSQL sẽ lưu trữ nội dung của các chunk để nhanh chóng tìm ra những chunk có chứa keyword trước khi truy vấn xuống vector database.
+    - Khi vector hóa một chunk và lưu vào vector database, PostgreSQL sẽ lưu trữ dữ liệu gồm:
+        - Chunk id
+        - Nội dung chunk
+    - Truyền query của người dùng vào PostgreSQL để tìm kiếm các record có chứa keyword
+    - Từ các record tìm được, lấy ra các chunk tương ứng dựa vào chunk id
     - Truy vấn các chunk này trong vector database để lấy embedding và thực hiện các bước tiếp theo như bình thường
