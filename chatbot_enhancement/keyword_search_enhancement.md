@@ -29,7 +29,7 @@
     - Từ các document tìm được, lấy ra các chunk tương ứng dựa vào chunk id
     - Truy vấn các chunk này trong vector database để lấy embedding và thực hiện các bước tiếp theo như bình thường
 
-## Giải pháp đề xuất 2: Sủ dụng PostgreSQL để hỗ trợ tìm kiếm keyword
+## Giải pháp đề xuất 2: Sử dụng PostgreSQL để hỗ trợ tìm kiếm keyword
 - Bởi vì Elasticsearch ngốn khá nhiều RAM, nên chúng em đề xuất một giải pháp thay thế nhẹ nhàng hơn là sử dụng PostgreSQL(hiện tại backend của Easyconf đang sử dụng PostgreSQL).
 - Giới thiệu ngắn về PostgreSQL:
     - PostgreSQL là một hệ quản trị cơ sở dữ liệu quan hệ mã nguồn mở, mạnh mẽ và có khả năng mở rộng cao.
