@@ -44,3 +44,18 @@
     - Truyền query của người dùng vào PostgreSQL để tìm kiếm các record có chứa keyword
     - Từ các record tìm được, lấy ra các chunk tương ứng dựa vào chunk id
     - Truy vấn các chunk này trong vector database để lấy embedding và thực hiện các bước tiếp theo như bình thường
+
+- Các bước làm:
+    - Sửa lại prisma schema để thêm bảng với các trường:
+        - chunk_id: string (primary key)
+        - content: text
+    - Cập nhật lại database dựa vào prisma schema mới
+    - Mỗi lần vector hóa một chunk và lưu vào vector database, đồng thời cũng lưu chunk đó vào bảng mới trong PostgreSQL
+    - Sửa lại luồng keyword search:
+        - Truyền vào cho hàm query của người dùng
+        - Từ query, thực hiện bước tokenization: chuẩn hóa unicode, lowercase, bỏ punctuation,...
+        - Thực hiện lọc bỏ stopwords
+        - Lúc này, đã có danh sách keyword(đã lọc)
+        - Với mỗi keyword, truy vấn PostgreSQL để tìm các chunk có chứa keyword. Thêm mỗi chunk id vào map kèm với tần số của chunk.
+        - Sort map theo tần số chunk giảm dần để ưu tiên các chunk có chứa nhiều keyword hơn
+        - Từ map này, lấy ra danh sách chunk id và truy vấn xuống vector database để lấy embedding và thực hiện các bước tiếp theo như bình thường
