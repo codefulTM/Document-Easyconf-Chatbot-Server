@@ -50,6 +50,7 @@
         - chunk_id: string (primary key)
         - content: text
     - Cập nhật lại database dựa vào prisma schema mới
+    - Thêm các API để CRUD các chunk trong bảng mới (nếu cần)
     - Mỗi lần vector hóa một chunk và lưu vào vector database, đồng thời cũng lưu chunk đó vào bảng mới trong PostgreSQL
     - Sửa lại luồng keyword search:
         - Truyền vào cho hàm query của người dùng
