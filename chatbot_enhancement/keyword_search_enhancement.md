@@ -54,9 +54,8 @@
     - Mỗi lần vector hóa một chunk và lưu vào vector database, đồng thời cũng lưu chunk đó vào bảng mới trong PostgreSQL
     - Sửa lại luồng keyword search:
         - Truyền vào cho hàm query của người dùng
-        - Từ query, thực hiện bước tokenization: chuẩn hóa unicode, lowercase, bỏ punctuation,...
-        - Thực hiện lọc bỏ stopwords
-        - Lúc này, đã có danh sách keyword(đã lọc)
+        - Từ query, thực hiện bước tokenization: lowercase, bỏ punctuation, lọc bỏ stopwords
+        - Lúc này, đã có danh sách keyword
         - Với mỗi keyword, truy vấn PostgreSQL để tìm các chunk có chứa keyword. Thêm mỗi chunk id vào map kèm với tần số của chunk.
         - Sort map theo tần số chunk giảm dần để ưu tiên các chunk có chứa nhiều keyword hơn
         - Từ map này, lấy ra danh sách chunk id và truy vấn xuống vector database để lấy embedding và thực hiện các bước tiếp theo như bình thường
