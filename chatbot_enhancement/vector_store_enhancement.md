@@ -4,6 +4,8 @@
 # Giải pháp 
 - Thêm cột collectionName vào bảng "Chunks" trong PostgreSQL để lưu tên collection tương ứng trong vector store.
 - Thêm cột is_deleted vào bảng "Chunks" trong PostgreSQL để đánh dấu các chunk đã bị xóa trong vector store.
+- Sau khi thêm các cột, cập nhật lại thay đổi cho database.
+- Cập nhật lại các API CRUD chunk trên backend.
 - Quy trình xóa:
     - Đầu tiên, đánh dấu các chunk cần xóa trong PostgreSQL bằng cách đặt is_deleted = true dựa trên collectionName.
     - Sau đó, xóa các vector tương ứng trong vector store dựa trên collectionName.
