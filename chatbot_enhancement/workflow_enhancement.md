@@ -1,3 +1,6 @@
+# Agent là gì?
+Agent (tác tử) trong lĩnh vực AI là một hệ thống có khả năng tự động nhận biết môi trường (sense), suy nghĩ/lập kế hoạch (think/plan), và thực hiện hành động (act) để đạt mục tiêu nhất định. Agent có thể sử dụng các công cụ (tools), lưu trữ trạng thái (state/context), và tự quyết định chuỗi hành động dựa trên thông tin hiện tại thay vì chỉ làm theo kịch bản cố định.
+
 # Vấn đề hiện tại
 - workflow.types.ts và workflowManager.ts dường như chỉ được code cho ConferenceWorkflow. Đang gặp khó khăn khi mở rộng cho các workflow khác.
 
