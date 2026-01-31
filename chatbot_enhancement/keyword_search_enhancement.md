@@ -50,6 +50,7 @@
         - chunk_id: string (primary key)
         - content: text
     - Cập nhật lại database dựa vào prisma schema mới
+    - Sửa lại code backend để tạo extension pg_trgm và trigram index cho database PostgreSQL(trong file prisma.provider.ts)
     - Thêm các API để CRUD các chunk trong bảng mới
     - Mỗi lần vector hóa một chunk và lưu vào vector database, đồng thời cũng lưu chunk đó vào bảng mới trong PostgreSQL
     - Sửa lại luồng keyword search:
