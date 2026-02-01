@@ -99,4 +99,35 @@ class LlMAgent {
 
 ## Kết luận & bước tiếp theo
 - Thay vì cố gắng định nghĩa toàn bộ workflow tĩnh, hãy cung cấp cho LLM bộ công cụ và state; LLM sẽ quyết định chuỗi hành động theo runtime.
-- Nếu bạn muốn, tôi có thể tạo file ví dụ `Code/Document-Easyconf-Chatbot-Server/src/chatbot/llmAgent.ts` và một runner/test nhỏ để minh hoạ.
+
+# Các bước thực hiện
+1. Comment lại function "runWorkflow" trong workflowManager.ts để tạm thời vô hiệu hóa workflow tĩnh.
+2. Chỉnh sửa lại prompt trong file english.ts và vietnamese.ts để không sử dụng "runWorkflow" nữa mà thay vào đó sử dụng kiến trúc agent mới.
+3. Comment lại công cụ "runWorkflow" trong english.ts để tránh việc gọi công cụ này.
+4. Định nghĩa Action schema trong một file mới, ví dụ actionSchema.ts. Action sẽ có cấu trúc:
+{
+  done: boolean
+}
+5. Sửa lại prompt để yêu cầu LLM trả về response dưới dạng:
+{
+  done: boolean
+}
+[Nội dung chính]
+Bên cạnh đó, sửa prompt để gợi ý LLM một số workflow phổ biến mà LLM có thể áp dụng. Ví dụ:
+- Workflow tìm kiếm thông tin về hội nghị: 
+	- 1. Nhận yêu cầu từ người dùng
+	- 2. Thử route đến conference agent
+	- 3. Nếu không được, dùng công cụ retrieveKnowledge để tìm thông tin hội nghị
+	- 4. Nếu không được, dịch yêu cầu người dùng sang tiếng Anh sau đó thử lại retrieveKnowledge
+	- 5. Tổng hợp kết quả và trả về cho người dùng
+6. Sửa lại hàm handleStreaming trong hostAgent.streaming.handler.ts để thực hiện vòng lặp agent:
+	- Lấy input: history, config, system instruction, tools.
+	- Gọi LLM với prompt mới để biết cần done hay chưa, để biết hành động kế tiếp là gì.
+	- Dựa vào trường done, kết thúc hoặc không kết thúc. Thực hiện cơ chế phát hiện sớm trường done. Nếu như trường done là true thì kết thúc vòng lặp. Cơ chế phát hiện sớm trường done: 
+		- Khi nhận chunk đầu, thêm vào buffer string
+		- Trích xuất chuỗi JSON từ buffer string
+		- Nếu parse thành công và có trường "done" -> chấp nhận
+		- Nếu parse không thành công, tiếp tục thêm chunk vào buffer string cho đến khi đạt giới hạn ký tự (ví dụ 1000 ký tự), nếu vẫn không parse được -> fallback: 
+			- Nếu có function call -> done = false
+			- Nếu chỉ có partial token(vd: 'don', 'done: tr') -> done = false
+   - Lặp lại cho đến khi nhận được DONE hoặc đạt giới hạn bước.
