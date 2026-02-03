@@ -104,11 +104,7 @@ class LlMAgent {
 1. Comment lại function "runWorkflow" trong workflowManager.ts để tạm thời vô hiệu hóa workflow tĩnh.
 2. Chỉnh sửa lại prompt trong file english.ts và vietnamese.ts để không sử dụng "runWorkflow" nữa mà thay vào đó sử dụng kiến trúc agent mới.
 3. Comment lại công cụ "runWorkflow" trong english.ts để tránh việc gọi công cụ này.
-4. Định nghĩa Action schema trong một file mới, ví dụ actionSchema.ts. Action sẽ có cấu trúc:
-{
-  done: boolean
-}
-5. Sửa lại prompt để yêu cầu LLM trả về response dưới dạng:
+4. Sửa lại prompt để yêu cầu LLM trả về response dưới dạng:
 {
   done: boolean
 }
@@ -120,7 +116,8 @@ Bên cạnh đó, sửa prompt để gợi ý LLM một số workflow phổ bi�
 	- 3. Nếu không được, dùng công cụ retrieveKnowledge để tìm thông tin hội nghị
 	- 4. Nếu không được, dịch yêu cầu người dùng sang tiếng Anh sau đó thử lại retrieveKnowledge
 	- 5. Tổng hợp kết quả và trả về cho người dùng
-6. Sửa lại hàm handleStreaming trong hostAgent.streaming.handler.ts để thực hiện vòng lặp agent:
+(Bước này tạm thời chỉ mới chỉnh sửa english.ts, sau này sẽ chỉnh sửa cả vietnamese.ts,...)
+5. Sửa lại hàm handleStreaming trong hostAgent.streaming.handler.ts để thực hiện vòng lặp agent:
 	- Lấy input: history, config, system instruction, tools.
 	- Gọi LLM với prompt mới để biết cần done hay chưa, để biết hành động kế tiếp là gì.
 	- Dựa vào trường done, kết thúc hoặc không kết thúc. Thực hiện cơ chế phát hiện sớm trường done. Nếu như trường done là true thì kết thúc vòng lặp. Cơ chế phát hiện sớm trường done: 
@@ -131,3 +128,5 @@ Bên cạnh đó, sửa prompt để gợi ý LLM một số workflow phổ bi�
 			- Nếu có function call -> done = false
 			- Nếu chỉ có partial token(vd: 'don', 'done: tr') -> done = false
    - Lặp lại cho đến khi nhận được DONE hoặc đạt giới hạn bước.
+
+6. Sửa lại response của LLM để loại bỏ {done: boolean} ra khỏi phần content trả về cho người dùng cuối.
