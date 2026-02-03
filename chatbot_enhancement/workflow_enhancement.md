@@ -116,7 +116,7 @@ Bên cạnh đó, sửa prompt để gợi ý LLM một số workflow phổ bi�
 	- 3. Nếu không được, dùng công cụ retrieveKnowledge để tìm thông tin hội nghị
 	- 4. Nếu không được, dịch yêu cầu người dùng sang tiếng Anh sau đó thử lại retrieveKnowledge
 	- 5. Tổng hợp kết quả và trả về cho người dùng
-(Bước này tạm thời chỉ mới chỉnh sửa english.ts, sau này sẽ chỉnh sửa cả vietnamese.ts,...)
+(Bước này tạm thời chỉ mới chỉnh sửa english.ts - Thêm step 2 và 3, sau này sẽ chỉnh sửa cả vietnamese.ts,...)
 5. Sửa lại hàm handleStreaming trong hostAgent.streaming.handler.ts để thực hiện vòng lặp agent:
 	- Lấy input: history, config, system instruction, tools.
 	- Gọi LLM với prompt mới để biết cần done hay chưa, để biết hành động kế tiếp là gì.
