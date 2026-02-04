@@ -130,3 +130,8 @@ Bên cạnh đó, sửa prompt để gợi ý LLM một số workflow phổ bi�
    - Lặp lại cho đến khi nhận được DONE hoặc đạt giới hạn bước.
 
 6. Sửa lại response của LLM để loại bỏ {done: boolean} ra khỏi phần content trả về cho người dùng cuối.
+
+*Cập nhật 04/02/2026*:
+1. Chỉnh sửa lại system instruction trong english.ts và vietnamese.ts để LLM không đính kèm {done: boolean} trong content trả về nữa. Khi thực hiện xong workflow, dùng function call "finishWorkflow" để báo cho hệ thống biết đã hoàn thành workflow.
+2. Thêm function call "finishWorkflow" trong english.ts và vietnamese.ts để báo cho hệ thống biết đã hoàn thành workflow.
+3. Sửa lại hàm handleStreaming trong hostAgent.streaming.handler.ts để kiểm tra function call "finishWorkflow" thay vì trường {done: boolean} trong content.
