@@ -1,10 +1,33 @@
 # Agent là gì?
 Agent (tác tử) trong lĩnh vực AI là một hệ thống có khả năng tự động nhận biết môi trường (sense), suy nghĩ/lập kế hoạch (think/plan), và thực hiện hành động (act) để đạt mục tiêu nhất định. Agent có thể sử dụng các công cụ (tools), lưu trữ trạng thái (state/context), và tự quyết định chuỗi hành động dựa trên thông tin hiện tại thay vì chỉ làm theo kịch bản cố định.
 
+# Trước khi có workflow hay agent
+Luồng hoạt động của chatbot trước khi có tính năng workflow/agent như sau:
+1. Chuẩn bị các tham số đầu vào và khởi tạo
+2. Định nghĩa các helpers nội bộ
+3. Vòng lặp chính(Lặp tối đa maxTurnsHostAgent lần):
+- Gửi event status_update
+- Gọi LLM để lấy response
+- Xử lý response từ LLM:
+	- Nếu lỗi, phát sự kiện chat_error
+	- Nếu có function call:
+		- Tạo turn role: 'model' chứa function call và đẩy vào lịch sử
+		- Nếu function call là 'routeToAgent', gọi subagent tương ứng và nhận kết quả trả về, đồng thời xử lý frontend action
+		- Tạo turn role: 'function' với kết quả trả về từ function call và đẩy vào lịch sử
+		- Tiếp tục vòng lặp, không kết thúc
+	- Nếu không có function call, chỉ có response stream:
+		- Đọc từng chunk trả về bởi LLM và phát các cập nhật response về socket
+		- Tạo turn role: 'model' với nội dung response đầy đủ và đẩy vào lịch sử, cũng như cập nhật response cuối cùng bên frontend
+		- Kết thúc vòng lặp
+
+
+
 # Vấn đề hiện tại
 - workflow.types.ts và workflowManager.ts dường như chỉ được code cho ConferenceWorkflow. Đang gặp khó khăn khi mở rộng cho các workflow khác.
 
 - Muốn LLM hoạt động như agent thì phải định nghĩa workflow từ trước một cách rườm rà phức tạp. Cần cách để LLM hoạt động như một agent mà không cần định nghĩa trước workflow quá chi tiết.
+
+- Mỗi khi LLM trả về stream response, lại kết thúc vòng lặp. Điều này không phù hợp với mô hình agent, nơi LLM có thể cần thực hiện nhiều hành động liên tiếp trước khi hoàn thành nhiệm vụ.
 
 # Giải pháp
 Dưới đây là hướng tiếp cận để cho LLM hoạt động như một agent mà không cần phải định nghĩa workflow tĩnh trước đó. Mục tiêu là cung cấp một tập hợp công cụ (tools) + state/context cho LLM và để LLM quyết định hành động theo vòng lặp sense → think → act.
