@@ -13,6 +13,6 @@
 # Thay đổi thực hiện
 - Đã thêm adapter `PooledGemini` để gọi Gemini thông qua `GeminiClientManagerService` (sử dụng pool/round-robin theo `apiType`). File mới: [src/chatbot/gemini/pooledGemini.ts](src/chatbot/gemini/pooledGemini.ts)
 - Đã cập nhật HostAgent/SubAgent để khởi tạo `PooledGemini` thay vì `Gemini`, cho phép luồng chat sử dụng pool khi có `additionalGeminiApiKeys`. File: [src/chatbot/handlers/intentHandler.orchestrator.ts](src/chatbot/handlers/intentHandler.orchestrator.ts#L1-L120)
-- Lưu ý: `PooledGemini.generateTurn(..., apiType)` mặc định dùng `apiType='interactive'` cho HostAgent. Các luồng batch/extract/... vẫn dùng `GeminiApiService`/orchestrator như trước.
+- Lưu ý: `PooledGemini.generateTurn(..., apiType)` mặc định dùng `apiType='chat'` cho HostAgent. Các luồng batch/extract/... vẫn dùng `GeminiApiService`/orchestrator như trước.
 - Cập nhật lại keyPools trong `GeminiClientManagerService`. File: [src/services/gemini/geminiClientManager.service.ts](src/services/gemini/geminiClientManager.service.ts#L30-L40)
 - Cập nhật thêm API key vào .env
