@@ -1,1 +1,3 @@
 - Cho tôi thông tin về hội nghị Cconfference oon Coomputer andd Communicationss Securityy
+- Cho tôi thông tin về hội nghị về các hệ thống cảm biến nhúng được kết nối mạng(ACM Conference on Embedded Networked Sensor Systems (SENSYS))
+- Cho tôi thông tin về Worldwide Workshop on ambient systems, networks and technologies
