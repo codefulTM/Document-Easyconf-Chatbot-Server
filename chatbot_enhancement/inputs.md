@@ -10,21 +10,25 @@
 
 - Kỳ vọng: ACM Conference on Embedded Networked Sensor Systems (SENSYS)
 - Kết quả trả về:
+  ![alt text](./outputs/output_2.png)
 
 3. Không khớp tên hội nghị nhưng tương đồng về nghĩa: Cho tôi một số thông tin về hội nghị về Research, Management, and Applications in Software Engineering.
 
 - Kỳ vọng: ACIS Conference on Software Engineering Research, Management and Applications (SERA)
 - Kết quả trả về:
+  ![alt text](./outputs/output_3.png)
 
 4. Không khớp tên hội nghị nhưng tương đồng về nghĩa(khó hơn): Cho tôi một số thông tin về hội nghị về Studies, Administration, and Practical Uses of Software Engineering.
 
 - Kỳ vọng: ACIS Conference on Software Engineering Research, Management and Applications (SERA)
 - Kết quả trả về:
+  ![alt text](./outputs/output_4.png)
 
 5. Sử dụng tiếng Việt và sai chính tả: Cho tôi một số thông tin về hội nghị về Khámm phhá Kiếnn thhhức vàa Khhai thhác Dữ liiiệu.
 
 - Kỳ vọng: ACM International Conference on Knowledge Discovery and Data Mining (KDD)
 - Kết quả trả về:
+  ![alt text](./outputs/output_5.png)
 
 # Test khả năng tương tác giữa chatbot và người dùng
 
@@ -32,11 +36,14 @@
 
 - Kỳ vọng: Chatbot hỏi lại có phải bạn muốn theo dõi hội nghị "...". Hội nghị ACM Conference on Computer and Communications Security (CCS) được theo dõi thành công.
 - Kết quả trả về:
+  ![alt text](./outputs/output_6.png)
 
 7. Theo dõi hội nghị sử dụng tiếng Việt: Tôi muốn theo dõi hội nghị về các hệ thống cảm biến nhúng được kết nối mạng.
 
 - Kỳ vọng: Chatbot hỏi lại có phải bạn muốn theo dõi hội nghị "...". Hội nghị ACM Conference on Embedded Networked Sensor Systems (SENSYS) được theo dõi thành công.
 - Kết quả trả về:
+  ![alt text](./outputs/output_7.png)
+  ![alt text](./outputs/output_8.png)
 
 8. Theo dõi hội nghị không khớp tên nhưng tương đồng về nghĩa: Tôi muốn theo dõi hội nghị về Research, Management, and Applications in Software Engineering.
 
