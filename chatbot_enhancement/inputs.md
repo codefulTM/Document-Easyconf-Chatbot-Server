@@ -49,16 +49,21 @@
 
 - Kỳ vọng: Chatbot hỏi lại có phải bạn muốn theo dõi hội nghị "...". Hội nghị ACIS Conference on Software Engineering Research, Management and Applications (SERA) được theo dõi thành công.
 - Kết quả trả về:
+  ![alt text](./outputs/output_9.png)
+  ![alt text](./outputs/output_10.png)
+  ![alt text](./outputs/output_11.png)
 
-9. Theo dõi hội nghị không khớp tên nhưng tương đồng về nghĩa(khó hơn): Tôi muốn theo dõi hội nghị về Studies, Administration, and Practical Uses of Software Engineering.
+9. Theo dõi hội nghị không khớp tên nhưng tương đồng về nghĩa(khó hơn): Tôi muốn theo dõi hội nghị về Studies, Administration, and Practical Uses of Software Engineering. (PARTIAL SUCCESS)
 
 - Kỳ vọng: Chatbot hỏi lại có phải bạn muốn theo dõi hội nghị "...". Hội nghị ACIS Conference on Software Engineering Research, Management and Applications (SERA) được theo dõi thành công.
-- Kết quả trả về:
+- Kết quả trả về: Chatbot gợi ý các hội nghị khác ACIS
+  ![alt text](./outputs/output_12.png)
 
-10. Theo dõi hội nghị sử dụng tiếng Việt và sai chính tả: Tôi muốn theo dõi hội nghị về Khámm phhá Kiếnn thhhức vàa Khhai thhác Dữ liiiệu.
+10. Theo dõi hội nghị sử dụng tiếng Việt và sai chính tả: Tôi muốn theo dõi hội nghị về Khámm phhá Kiếnn thhhức vàa Khhai thhác Dữ liiiệu. (PARTIAL SUCCESS)
 
 - Kỳ vọng: Chatbot hỏi lại có phải bạn muốn theo dõi hội nghị "...". Hội nghị ACM International Conference on Knowledge Discovery and Data Mining (KDD) được theo dõi thành công.
 - Kết quả trả về:
+  ![alt text](./outputs/output_13.png)
 
 # Test khả năng lọc ra các hội nghị dựa vào các tiêu chí khác nhau
 
