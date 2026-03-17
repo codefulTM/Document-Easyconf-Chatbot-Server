@@ -30,6 +30,8 @@
 - Kết quả trả về:
   ![alt text](./outputs/output_5.png)
 
+6. Tìm kiếm link của hội nghị: ...
+
 # Test khả năng tương tác giữa chatbot và người dùng
 
 6. Theo dõi hội nghị sai chính tả: Tôi muốn theo dõi hội nghị Cconfference oon Coomputer andd Communicationss Securityy.
@@ -73,11 +75,13 @@
 
 - Kỳ vọng: Trả về danh sách các hội nghị có Rank A\*.
 - Kết quả trả về:
+  ![alt text](./outputs/output_14.png)
 
 2. Lọc theo Rank(dùng từ tiếng Việt của "Rank"): Cho tôi một số hội nghị có xếp hạng A\*.
 
 - Kỳ vọng: Trả về danh sách các hội nghị có Rank A\*.
 - Kết quả trả về:
+  ![alt text](./outputs/output_15.png)
 
 3. Lọc theo Rank(dùng từ đồng nghĩa với "Rank" như "Level", "Class", "Tier",...): Cho tôi một số hội nghị có Level A\*.
 
@@ -99,3 +103,7 @@
 - Lọc theo Rank và Abstract due: Cho tôi một số hội nghị có Rank B và hạn chót nộp bản tóm tắt vào ngày 5/6/2024.
 - Kỳ vọng: Trả về danh sách các hội nghị có Rank B và hạn chót nộp bản tóm tắt vào ngày 5/6/2024, bao gồm "AAAI Conference on Human Computation and Crowdsourcing".
 - Kết quả trả về:
+
+# Bổ sung
+
+- Tìm các hội nghị liên quan đến database trong tháng 1 năm 2025
