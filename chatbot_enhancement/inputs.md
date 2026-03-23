@@ -30,11 +30,121 @@
 - Kết quả trả về:
   ![alt text](./outputs/output_5.png)
 
-6. Tìm kiếm link của hội nghị: ...
+6. Tìm kiếm link của hội nghị: Cho tôi link chính thức của hội nghị ICML 2025.
+
+- Kỳ vọng: Trả về URL chính thức của ICML 2025.
+- Kết quả trả về:
+  (Đang chờ)
+
+7. VI: Tìm thông tin ICML 2025, cho tôi deadline nộp bài và địa điểm tổ chức.
+
+- Kỳ vọng: Trả về deadline nộp bài và địa điểm tổ chức ICML 2025.
+- Kết quả trả về:
+  (Đang chờ)
+
+8. EN: Find ICML 2025 and give me submission deadline and conference location.
+
+- Expected: Return the submission deadline and conference location of ICML 2025.
+- Actual:
+  (TBD)
+
+9. VI: Hội nghị nào về NLP security trong năm 2025 ở Châu Âu?
+
+- Kỳ vọng: Trả về danh sách hội nghị 2025 tại Châu Âu về NLP security.
+- Kết quả trả về:
+  (Đang chờ)
+
+10. EN: Which conferences are about NLP security in 2025 in Europe?
+
+- Expected: List 2025 European NLP security conferences.
+- Actual:
+  (TBD)
+
+11. VI: So sánh ICLR và NeurIPS về chủ đề chính và thời hạn nộp bài gần nhất.
+
+- Kỳ vọng: So sánh chủ đề chính và deadline nộp bài gần nhất giữa ICLR và NeurIPS.
+- Kết quả trả về:
+  (Đang chờ)
+
+12. EN: Compare ICLR and NeurIPS by main topics and nearest submission deadlines.
+
+- Expected: Compare main topics and nearest submission deadlines for ICLR and NeurIPS.
+- Actual:
+  (TBD)
+
+13. VI: Tìm hội nghị computer vision có rank cao và có hình thức hybrid hoặc online.
+
+- Kỳ vọng: Trả về hội nghị computer vision rank cao và hybrid/online.
+- Kết quả trả về:
+  (Đang chờ)
+
+14. EN: Find high-rank computer vision conferences with hybrid or online format.
+
+- Expected: Return high-rank CV conferences with hybrid or online format.
+- Actual:
+  (TBD)
+
+15. VI: Cho tôi danh sách hội nghị AI tổ chức tại Việt Nam hoặc Đông Nam Á.
+
+- Kỳ vọng: Trả về danh sách hội nghị AI tại Việt Nam/Dong Nam Á.
+- Kết quả trả về:
+  (Đang chờ)
+
+16. EN: List AI conferences hosted in Vietnam or Southeast Asia.
+
+- Expected: List AI conferences in Vietnam or Southeast Asia.
+- Actual:
+  (TBD)
+
+17. VI: Deadline của AAAI 2026 là khi nào? Nếu có nhiều mốc, ưu tiên full paper.
+
+- Kỳ vọng: Trả về deadline AAAI 2026, ưu tiên full paper.
+- Kết quả trả về:
+  (Đang chờ)
+
+18. EN: What is the AAAI 2026 deadline? If there are multiple dates, prioritize full paper.
+
+- Expected: Provide AAAI 2026 deadline, prioritize full paper.
+- Actual:
+  (TBD)
+
+19. VI: Tìm conference về machine learning có CFP còn mở trong 60 ngày tới.
+
+- Kỳ vọng: Trả về conference ML với CFP mở trong 60 ngày.
+- Kết quả trả về:
+  (Đang chờ)
+
+20. EN: Find machine learning conferences with CFP still open in the next 60 days.
+
+- Expected: Return ML conferences with CFP open in 60 days.
+- Actual:
+  (TBD)
+
+21. VI (fallback probe): Tìm hội nghị Quantum Mythical Computing Summit 2099 tại Atlantis.
+
+- Kỳ vọng: Nêu rõ không tìm được vì là sự kiện giả tưởng/bất khả.
+- Kết quả trả về:
+  (Đang chờ)
+
+22. EN (fallback probe): Find the Quantum Mythical Computing Summit 2099 in Atlantis.
+
+- Expected: Indicate this is fictional/not found.
+- Actual:
+  (TBD)
+
+23. VI (fallback probe): Hội nghị ABCXYZ-9999 năm 2045 có deadline chưa?
+
+- Kỳ vọng: Trả về không tìm được do không tồn tại.
+- Kết quả trả về:
+  (Đang chờ)
+
+24. EN (fallback probe): Does conference ABCXYZ-9999 in 2045 have a submission deadline?
+
+- Expected: Indicate no such conference.
+- Actual:
+  (TBD)
 
 # Test khả năng tương tác giữa chatbot và người dùng
-
-6. Theo dõi hội nghị sai chính tả: Tôi muốn theo dõi hội nghị Cconfference oon Coomputer andd Communicationss Securityy.
 
 - Kỳ vọng: Chatbot hỏi lại có phải bạn muốn theo dõi hội nghị "...". Hội nghị ACM Conference on Computer and Communications Security (CCS) được theo dõi thành công.
 - Kết quả trả về:
@@ -103,7 +213,3 @@
 - Lọc theo Rank và Abstract due: Cho tôi một số hội nghị có Rank B và hạn chót nộp bản tóm tắt vào ngày 5/6/2024.
 - Kỳ vọng: Trả về danh sách các hội nghị có Rank B và hạn chót nộp bản tóm tắt vào ngày 5/6/2024, bao gồm "AAAI Conference on Human Computation and Crowdsourcing".
 - Kết quả trả về:
-
-# Bổ sung
-
-- Tìm các hội nghị liên quan đến database trong tháng 1 năm 2025
