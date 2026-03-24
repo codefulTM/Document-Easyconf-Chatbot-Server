@@ -30,7 +30,7 @@
 - Kết quả trả về:
   ![alt text](./outputs/output_5.png)
 
-6. Tìm kiếm link của hội nghị: Cho tôi link chính thức của hội nghị ICML 2025.
+6. Tìm kiếm link của hội nghị: Cho tôi link chính thức của hội nghị ICML 2025.(fail)
 
 - Kỳ vọng: Trả về URL chính thức của ICML 2025.
 - Kết quả trả về:
@@ -40,15 +40,15 @@
 
 - Kỳ vọng: Trả về deadline nộp bài và địa điểm tổ chức ICML 2025.
 - Kết quả trả về:
-  (Đang chờ)
+  ![alt text](./outputs/output_16.png)
 
 8. EN: Find ICML 2025 and give me submission deadline and conference location.
 
 - Expected: Return the submission deadline and conference location of ICML 2025.
 - Actual:
-  (TBD)
+  ![alt text](./outputs/output_17.png)
 
-9. VI: Hội nghị nào về NLP security trong năm 2025 ở Châu Âu?
+9. VI: Hội nghị nào về NLP security trong năm 2025 ở Châu Âu? (Fail - Có thể do thiếu filter theo địa điểm)
 
 - Kỳ vọng: Trả về danh sách hội nghị 2025 tại Châu Âu về NLP security.
 - Kết quả trả về:
@@ -60,7 +60,7 @@
 - Actual:
   (TBD)
 
-11. VI: So sánh ICLR và NeurIPS về chủ đề chính và thời hạn nộp bài gần nhất.
+11. VI: So sánh ICLR và NeurIPS về chủ đề chính và thời hạn nộp bài gần nhất. (Fail - Bổ sung ví dụ vào prompt dạy chatbot trường hợp này)
 
 - Kỳ vọng: So sánh chủ đề chính và deadline nộp bài gần nhất giữa ICLR và NeurIPS.
 - Kết quả trả về:
@@ -72,7 +72,7 @@
 - Actual:
   (TBD)
 
-13. VI: Tìm hội nghị computer vision có rank cao và có hình thức hybrid hoặc online.
+13. VI: Tìm hội nghị computer vision có rank cao và có hình thức hybrid hoặc online. (Fail - Filter có thể chứa mảng các giá trị thay vì chỉ 1 giá trị duy nhất. Bên cạnh đó, có thể bổ sung enum để chatbot dễ truyền tham số hơn)
 
 - Kỳ vọng: Trả về hội nghị computer vision rank cao và hybrid/online.
 - Kết quả trả về:
@@ -88,7 +88,7 @@
 
 - Kỳ vọng: Trả về danh sách hội nghị AI tại Việt Nam/Dong Nam Á.
 - Kết quả trả về:
-  (Đang chờ)
+  ![alt text](./outputs/output_18.png)
 
 16. EN: List AI conferences hosted in Vietnam or Southeast Asia.
 
@@ -100,15 +100,15 @@
 
 - Kỳ vọng: Trả về deadline AAAI 2026, ưu tiên full paper.
 - Kết quả trả về:
-  (Đang chờ)
+  ![alt text](./outputs/output_19.png)
 
 18. EN: What is the AAAI 2026 deadline? If there are multiple dates, prioritize full paper.
 
 - Expected: Provide AAAI 2026 deadline, prioritize full paper.
 - Actual:
-  (TBD)
+  ![alt text](./outputs/output_20.png)
 
-19. VI: Tìm conference về machine learning có CFP còn mở trong 60 ngày tới.
+19. VI: Tìm conference về machine learning có CFP còn mở trong 60 ngày tới. (Fail - thiếu filter theo CFP???)
 
 - Kỳ vọng: Trả về conference ML với CFP mở trong 60 ngày.
 - Kết quả trả về:
