@@ -213,3 +213,5 @@
 - Lọc theo Rank và Abstract due: Cho tôi một số hội nghị có Rank B và hạn chót nộp bản tóm tắt vào ngày 5/6/2024.
 - Kỳ vọng: Trả về danh sách các hội nghị có Rank B và hạn chót nộp bản tóm tắt vào ngày 5/6/2024, bao gồm "AAAI Conference on Human Computation and Crowdsourcing".
 - Kết quả trả về:
+
+Hãy tìm hội nghị liên quan đến Natural Language Processing trong 2025 được tổ chức offline và chọn ra hội nghị có rank cao nhất để follow(Fail - thêm sortBy theo rank)
