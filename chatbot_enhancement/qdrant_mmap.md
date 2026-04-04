@@ -112,21 +112,21 @@
   - Kiểm tra
     - `ram_usage_bytes`: RAM dùng thực tế của Qdrant (tránh quá tải cgroup).
     - `disk_usage_bytes`: dung lượng lưu trữ đang dùng (tránh disk full).
-    - `query_count`: tổng số truy vấn đã xử lý (throughput cơ bản).
+    <!-- - `query_count`: tổng số truy vấn đã xử lý (throughput cơ bản). -->
     - `qdrant_collection_points_count`: số điểm trong collection (quy mô dữ liệu).
     - `qdrant_collection_segments_count`: số segment đang load (ảnh hưởng search/optimize).
-    - `qdrant_query_failures_total`: số query lỗi (sức khỏe service).
-    - `qdrant_gc_duration_seconds` (nếu có): thời gian GC(Garbage Collection), spike = memory pressure(gọi GC với duration càng dài thì càng báo hiệu memory pressure càng cao).
-    - `qdrant_oom_kills_total` / `container_memory_failures_total`: event OOM.
+      <!-- - `qdrant_query_failures_total`: số query lỗi (sức khỏe service). -->
+        <!-- - `qdrant_gc_duration_seconds` (nếu có): thời gian GC(Garbage Collection), spike = memory pressure(gọi GC với duration càng dài thì càng báo hiệu memory pressure càng cao). -->
+        <!-- - `qdrant_oom_kills_total` / `container_memory_failures_total`: event OOM. -->
     - `qdrant_open_file_descriptors`: số file descriptor mở (mmap cần FD đủ lớn). "mở" ở đây là kết nối với file ở kernel, sẵn sàng thao tác, không phải là nạp file vào RAM.
     - `container_memory_swap`: swap container đã dùng. Khác với `disk_usage_bytes` - dùng disk để chứa data, `container_memory_swap` là dùng disk để mở rộng RAM.
     - `qdrant_up`: service có alive (1/0).
-    - `qdrant_requests_in_flight`: số request đang xử lý tại một thời điểm.
+    <!-- - `qdrant_requests_in_flight`: số request đang xử lý tại một thời điểm. -->
 - Tạo một cron job để định kỳ kiểm tra health check endpoint và log kết quả. Đồng thời, tạo alert rule như sau:
   - Cảnh báo `ram_usage_bytes > 80% limit`.
-  - Cảnh báo `qdrant_oom_kills_total > 0` hoặc `container_memory_failures_total > 0`.
+  <!-- - Cảnh báo `qdrant_oom_kills_total > 0` hoặc `container_memory_failures_total > 0`. -->
   - Cảnh báo `qdrant_open_file_descriptors > 90% * max_open_files = 90% * 512` hoặc trên ngưỡng tối đa.
-  - Cảnh báo `qdrant_requests_in_flight > threshold = số nhân CPU * 1.5` (throttle load).
+  <!-- - Cảnh báo `qdrant_requests_in_flight > threshold = số nhân CPU * 1.5` (throttle load). -->
   - Cảnh báo `qdrant_disk_usage_bytes` gần đầy volume(> 75% volume).
 
 ## Deliverables
