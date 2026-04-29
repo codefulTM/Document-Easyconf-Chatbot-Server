@@ -35,7 +35,7 @@ type Pending = { resolve: (v: any) => void; reject: (e: any) => void };
 const pendingEmitAcks = new Map<string, Pending>();
 
 process.on("message", (msg: any) => {
-  if (!msg || msg.type !== IPCCommonType.EMIT_ACK) return;
+  if (!msg || msg.type !== IPCEvent.EMIT_ACK) return;
   const key = `${msg.id ?? "global"}:${msg.emitId}`;
   const p = pendingEmitAcks.get(key);
   if (!p) return;
@@ -74,7 +74,7 @@ export function emitToParentAwaitAck(
       },
     });
 
-    process.send({ type: IPCCommonType.EMIT, id, emitId, event, payload });
+    process.send({ type: IPCEvent.EMIT, id, emitId, event, payload });
   });
 }
 ```
@@ -89,10 +89,10 @@ export function emitToParentAwaitAck(
 - Trong `ChildProcessWrapper` (file `src/workers/childProcessManager.ts`) thêm:
   - `emitHandlers: Map<string, (wrapper, msg) => Promise<any>>`
   - `registerEmitHandler(eventName, handler)` API để đăng ký handler cụ thể (ví dụ `chat_update`, `stream_chunk`).
-- Trong `child.on('message', msg => { ... })` thêm branch xử lý khi `msg.type === IPCCommonType.EMIT`:
+- Trong `child.on('message', msg => { ... })` thêm branch xử lý khi `msg.type === IPCEvent.EMIT`:
   - lookup handler = `this.emitHandlers.get(msg.event)` hoặc fallback default.
   - await handler(this, msg) (bảo đảm try/catch)
-  - reply `this.child.send({ type: IPCCommonType.EMIT_ACK, id: msg.id ?? null, emitId: msg.emitId, payload })`.
+  - reply `this.child.send({ type: IPCEvent.EMIT_ACK, id: msg.id ?? null, emitId: msg.emitId, payload })`.
 
 Mẫu code (rút gọn):
 
@@ -102,14 +102,14 @@ this.emitHandlers = new Map();
 
 this.child.on('message', (msg:any) => {
   if (!msg || !msg.type) return;
-  if (msg.type === IPCCommonType.EMIT) {
+  if (msg.type === IPCEvent.EMIT) {
     (async () => {
       const handler = this.emitHandlers.get(msg.event);
       try {
         const res = handler ? await handler(this, msg) : { success: true };
-        this.child.send({ type: IPCCommonType.EMIT_ACK, id: msg.id ?? null, emitId: msg.emitId, payload: res });
+        this.child.send({ type: IPCEvent.EMIT_ACK, id: msg.id ?? null, emitId: msg.emitId, payload: res });
       } catch (err) {
-        this.child.send({ type: IPCCommonType.EMIT_ACK, id: msg.id ?? null, emitId: msg.emitId, payload: { success: false, error: String(err) } });
+        this.child.send({ type: IPCEvent.EMIT_ACK, id: msg.id ?? null, emitId: msg.emitId, payload: { success: false, error: String(err) } });
       }
     })();
     return;
