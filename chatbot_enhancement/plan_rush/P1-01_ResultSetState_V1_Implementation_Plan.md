@@ -11,6 +11,15 @@
 
 Tạo một module lưu trạng thái danh sách kết quả conference theo conversation, để Resolver (P1-02) có nguồn sự thật xác định tham chiếu thứ tự ("cái thứ 2", "cái cuối", v.v.) mà không cần LLM suy đoán.
 
+**Cách tiếp cận:** LLM truyền `identifierType="ordinal"` với `identifier` là số (1-based, âm cho đếm từ cuối). Resolver xử lý số → index 0-based → lấy ID từ list thật.
+
+| identifier | Ý nghĩa |
+|---|---|
+| `1` | Phần tử đầu tiên |
+| `2` | Phần tử thứ 2 |
+| `-1` | Phần tử cuối |
+| `-2` | Phần tử áp cuối |
+
 ---
 
 ## 2. Kiến trúc Resolver (P1-02) — 2 tầng
@@ -19,27 +28,27 @@ Resolver có 2 tầng xử lý, hoạt động tuần tự:
 
 ### Tầng 1: Fast Path — Resolve tất cả (trong preToolValidator)
 
-Khi LLM gọi tool mutating với identifier mơ hồ ("thứ 2"), ROUTE không qua tool mới. preToolValidator tự động resolve mà không cần thêm vòng LLM.
+LLM gọi tool mutating với `identifierType="ordinal"`. preToolValidator tự động resolve số → ID thật, không cần thêm vòng LLM.
 
 ```
-[preToolValidator] nhận manageFollow(identifier="thứ 2")
-  → gọi ResultSetResolver.resolveAll(convId, "thứ 2")
+[preToolValidator] nhận manageFollow(identifier="2", identifierType="ordinal")
+  → gọi ResultSetResolver.resolveAll(convId, 2)   // 1-based
     → quét TẤT CẢ result set còn hạn trong conversation
-    → thử resolve "thứ 2" trên từng list
+    → thử resolve số 2 trên từng list → index = 1 (0-based)
     → kết quả:
       • 0 list match → out_of_range_reference (block)
-      • 1 list match duy nhất → resolve, thay identifier, allowed=true  ✅ 1 turn
+      • 1 list match duy nhất → resolve, thay identifier=ID, allowed=true  ✅ 1 turn
       • 2+ list match → ambiguity_blocked_mutation (block)
 ```
 
 ### Tầng 2: Slow Path — Tool mới `resolveConferenceRef` (cho trường hợp mơ hồ)
 
-Khi Tầng 1 block với `ambiguity_blocked_mutation`, LLM thấy lỗi → dùng tool `resolveConferenceRef` với ngữ cảnh từ conversation.
+Khi Tầng 1 block với `ambiguity_blocked_mutation`, LLM thấy lỗi → dùng tool `resolveConferenceRef` cung cấp thêm ngữ cảnh.
 
 ```
 [LLM] thấy ambiguity_blocked_mutation
-  → gọi resolveConferenceRef(ordinal="thứ 2", contextHint="AI conferences")
-    → handler dùng contextHint match với query_text trong result sets
+  → gọi resolveConferenceRef(ordinal=2, contextHint="AI conferences")
+    → handler cosine similarity match với queryEmbedding
     → resolve ra conf_002
     → trả về
   → LLM gọi manageFollow(identifier="conf_002", identifierType="id")
@@ -48,19 +57,20 @@ Khi Tầng 1 block với `ambiguity_blocked_mutation`, LLM thấy lỗi → dùn
 
 ### Tổng kết: Resolve Strategy
 
-| Kịch bản | Tầng | Số vòng LLM | Cơ chế |
-|---|---|---|---|
-| 1 list trong conversation | Fast Path | 1 | Resolve tất cả → chỉ 1 match |
-| Nhiều list, ordinal chỉ match 1 | Fast Path | 1 | Resolve tất cả → chỉ 1 match |
-| Nhiều list, ordinal match nhiều | Slow Path | 2 | Block → LLM gọi tool với contextHint |
-| Không list nào match | Fast Path | 1 (error) | Block → báo user không tìm thấy |
-| Tất cả list đều stale | Fast Path | 1 (error) | Block → stale_result_set |
+| Kịch bản                        | Tầng      | Số vòng LLM | Cơ chế                               |
+| ------------------------------- | --------- | ----------- | ------------------------------------ |
+| 1 list trong conversation       | Fast Path | 1           | Resolve tất cả → chỉ 1 match         |
+| Nhiều list, ordinal chỉ match 1 | Fast Path | 1           | Resolve tất cả → chỉ 1 match         |
+| Nhiều list, ordinal match nhiều | Slow Path | 2           | Block → LLM gọi tool với contextHint |
+| Không list nào match            | Fast Path | 1 (error)   | Block → báo user không tìm thấy      |
+| Tất cả list đều stale           | Fast Path | 1 (error)   | Block → stale_result_set             |
 
 ---
 
 ## 3. Data Model (Schema)
 
 Thay đổi so với contract gốc: **bỏ `query_signature`, thêm `query_text`**.
+
 - `query_signature` là hash 1 chiều → không match được với context từ LLM
 - `query_text` lưu nguyên văn → có thể so khớp với contextHint
 
@@ -119,23 +129,24 @@ interface IResultSetStateStore {
 interface IResultSetResolver {
   /**
    * Resolve ordinal reference trên TẤT CẢ result set còn hạn.
+   * ordinal là số 1-based (dương = đếm xuôi, âm = đếm từ cuối, -1 = cuối).
    * Trả về kết quả chi tiết để preToolValidator quyết định block hay pass.
    */
   resolveAll(
     conversationId: string,
-    ordinal: string,
+    ordinal: number,
   ): Promise<ResolveAllResult>;
 
   /**
    * Resolve ordinal với contextHint cụ thể (từ LLM).
-   * Match qua 2 bước: exact match queryText → fallback cosine similarity với queryEmbedding.
+   * Match bằng cosine similarity giữa contextEmbedding và queryEmbedding.
+   * Chọn result set có similarity cao nhất > threshold.
    * Dùng trong handler của tool resolveConferenceRef.
    */
   resolveByContext(
     conversationId: string,
-    contextHint: string,
     contextEmbedding: number[],
-    ordinal: string,
+    ordinal: number,
   ): Promise<ResolveResult>;
 
   /** Helper sinh embedding cho 1 text string (tái sử dụng embedding service có sẵn) */
@@ -169,25 +180,26 @@ type ResolveAllResult = {
 
 ### 5.1 Function Declaration
 
-Chỉ thêm 1 file: function declarations (không sửa các tool mutating hiện có)
+File mới: function declarations.
 
 ```typescript
 export const englishResolveConferenceRefDeclaration: FunctionDeclaration = {
   name: "resolveConferenceRef",
   description:
     "Resolves an ordinal or ambiguous conference reference to a specific conference ID. " +
-    "Use this when the user says things like 'the 2nd one', 'cái thứ 3', 'the last one', 'cái cuối', " +
-    "'the first one', v.v. and the system could not automatically resolve it. " +
-    "Provide the ordinal reference and a context hint describing which search result list the user is referring to. " +
+    "Use this when the system blocked a mutation due to ambiguity (2+ result lists match). " +
+    "Provide the ordinal number and a context hint describing which search result list the user is referring to. " +
     "The system will return the exact conference ID you can use in subsequent tool calls.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       ordinal: {
-        type: Type.STRING,
+        type: Type.NUMBER,
         description:
-          "The ordinal reference from the user's message, exactly as spoken. " +
-          "Examples: 'thứ 2', 'thứ 3', 'cuối', 'đầu tiên', 'last one', 'second one'.",
+          "The ordinal position of the conference, 1-based. " +
+          "Positive = count from start (1 = first). " +
+          "Negative = count from end (-1 = last, -2 = second to last). " +
+          "Examples: 2 for 'thứ 2', -1 for 'cuối', 1 for 'đầu tiên'.",
       },
       contextHint: {
         type: Type.STRING,
@@ -216,41 +228,53 @@ class ResolveConferenceRefHandler implements IFunctionHandler {
   async execute(context: FunctionHandlerInput): Promise<FunctionHandlerOutput> {
     const { args } = context;
     const conversationId = this.extractConversationId(context);
-    const ordinal = args.ordinal as string;
+    const ordinal = args.ordinal as number;       // number, 1-based
     const contextHint = args.contextHint as string;
 
     // Sinh embedding cho contextHint để semantic matching
-    const contextEmbedding = await resultSetResolver.generateEmbedding(contextHint);
+    const contextEmbedding =
+      await resultSetResolver.generateEmbedding(contextHint);
 
-    // Bước 1: Exact match + cosine similarity với queryEmbedding
+    // Bước 1: Cosine similarity giữa contextEmbedding và queryEmbedding
     const contextMatch = await resultSetResolver.resolveByContext(
-      conversationId, contextHint, contextEmbedding, ordinal
+      conversationId,
+      contextEmbedding,
+      ordinal,
     );
     if (contextMatch.resolvedId) {
-      return { modelResponseContent: JSON.stringify({
-        resolved: true,
-        conferenceId: contextMatch.resolvedId,
-        confidence: contextMatch.confidence,
-        matchType: contextMatch.confidence === "high" ? "exact" : "semantic",
-      })};
+      return {
+        modelResponseContent: JSON.stringify({
+          resolved: true,
+          conferenceId: contextMatch.resolvedId,
+          confidence: "high",
+          matchType: "semantic",
+        }),
+      };
     }
 
     // Bước 2: Fallback — resolveAll
-    const allMatch = await resultSetResolver.resolveAll(conversationId, ordinal);
+    const allMatch = await resultSetResolver.resolveAll(
+      conversationId,
+      ordinal,
+    );
     if (allMatch.uniqueMatch) {
-      return { modelResponseContent: JSON.stringify({
-        resolved: true,
-        conferenceId: allMatch.uniqueMatch,
-        confidence: "medium",
-        matchType: "fallback_all",
-      })};
+      return {
+        modelResponseContent: JSON.stringify({
+          resolved: true,
+          conferenceId: allMatch.uniqueMatch,
+          confidence: "medium",
+          matchType: "fallback_all",
+        }),
+      };
     }
 
     // Không resolve được
-    return { modelResponseContent: JSON.stringify({
-      resolved: false,
-      message: "Could not resolve the conference reference.",
-    })};
+    return {
+      modelResponseContent: JSON.stringify({
+        resolved: false,
+        message: "Could not resolve the conference reference.",
+      }),
+    };
   }
 }
 ```
@@ -282,8 +306,8 @@ if (isConferenceListMode) {
   );
 
   // >>> LƯU RESULT SET <<<
-  const ids = compactItems.map(item => item.id);
-  const embedding = await this.resultSetStateStore.generateEmbedding(query);
+  const ids = compactItems.map((item) => item.id);
+  const embedding = await this.resultSetResolver.generateEmbedding(query);
   await this.resultSetStateStore.save(conversationId, query, embedding, ids);
 
   const compactPayload = {
@@ -297,11 +321,12 @@ if (isConferenceListMode) {
 ```
 
 **Khi nào gọi save:**
+
 - Chỉ gọi khi `listMode=true` và `isConferenceListMode === true`
 - Chỉ gọi khi retrieve thành công, `compactItems.length > 0`
 - `queryText` = chính là `query` string (không hash)
 - `queryEmbedding` = embedding vector của `query` (sinh bằng embedding service tái sử dụng từ codebase)
-- Cần inject `IResultSetStateStore` vào constructor của `RetrieveKnowledgeHandler`
+- Cần inject `IResultSetStateStore` và `IResultSetResolver` vào constructor của `RetrieveKnowledgeHandler`
 
 ### 6.2 Fast Path Integration (preToolValidator)
 
@@ -313,10 +338,23 @@ if (isMutatingAction) {
   // ... check identifier, identifierType ...
 
   // >>> FAST PATH: resolveAll TRƯỚC KHI BLOCK <<<
-  // Nếu identifier có vẻ là ordinal reference ("thứ 2", "cuối", etc.)
-  if (isOrdinalReference(identifier)) {
-    const result = await resultSetResolver.resolveAll(conversationId, identifier);
-    
+  // identifierType === "ordinal" → LLM đã extract số, Resolver xử lý
+  if (identifierType?.trim() === "ordinal") {
+    const ordinalNum = parseInt(identifier as string, 10);
+    if (isNaN(ordinalNum)) {
+      // Identifier không phải số → parse lỗi, block
+      return buildBlockedResult({
+        errorCode: OrchestrationSafetyErrorCode.INVALID_TOOL_ARGS,
+        message: `${functionName} received an invalid ordinal identifier.`,
+        userMessage: "Số thứ tự không hợp lệ. Vui lòng thử lại.",
+      });
+    }
+
+    const result = await resultSetResolver.resolveAll(
+      conversationId,
+      ordinalNum,
+    );
+
     if (result.uniqueMatch) {
       // Chỉ 1 match -> resolve ngay, không cần LLM
       normalizedArgs.identifier = result.uniqueMatch;
@@ -327,7 +365,7 @@ if (isMutatingAction) {
         normalized_args: normalizedArgs,
       };
     }
-    
+
     if (result.matches.length === 0) {
       // 0 match -> out of range
       return buildBlockedResult({
@@ -348,17 +386,40 @@ if (isMutatingAction) {
 }
 ```
 
-**Chú ý:** `isOrdinalReference()` parse identifier xem có phải số thứ tự không. Nếu không phải (vd identifier là acronym thật) thì không chạy resolveAll, để ambiguity check xử lý như hiện tại.
+**Chú ý:** Chỉ chạy resolveAll khi `identifierType === "ordinal"`. Các identifierType khác (`"acronym"`, `"title"`, `"id"`) không chạy resolveAll, để ambiguity check xử lý như hiện tại.
 
-### 6.3 Slow Path Integration (tool resolveConferenceRef)
+### 6.3 Fast Path — Cập nhật identifierType enum trong tool declarations cũ
+
+**File:** Tất cả các file language functions (`english.ts`, `vietnamese.ts`, `spanish.ts`, ...)
+
+Thêm `"ordinal"` vào enum `identifierType` của các mutation tool:
+- `manageFollow`
+- `manageCalendar`
+- `manageBlacklist`
+- `rateConference`
+- `getConferenceFeedback`
+- `countConferenceFollowed`
+
+```typescript
+identifierType: {
+  type: Type.STRING,
+  enum: ["acronym", "title", "id", "ordinal"],  // + "ordinal"
+  description: "...",
+}
+```
+
+Việc này cho phép Gemini sinh `identifierType="ordinal"` khi user dùng số thứ tự.
+
+### 6.4 Slow Path Integration (tool resolveConferenceRef)
 
 **File:** `src/chatbot/language/functions/english.ts` (và các file language khác)
 **File:** `src/chatbot/gemini/functionRegistry.ts`
 
-- Chỉ thêm tool declaration mới, không sửa tool cũ
+- Thêm tool declaration mới `resolveConferenceRef` (xem Section 5)
+- Register handler trong functionRegistry
 - System prompt: thêm 1 đoạn hướng dẫn LLM dùng tool này
 
-### 6.4 Warm Memory Integration (P2-04)
+### 6.5 Warm Memory Integration (P2-04)
 
 ```
 MemoryManagerLite
@@ -368,17 +429,27 @@ MemoryManagerLite
 
 ---
 
-## 7. Integration: Không sửa tool declarations cũ — Chỉ sửa system prompt
+## 7. Thay đổi cần thiết
 
-**Nguyên tắc:** Zero touch vào các tool declaration hiện có (manageFollow, manageCalendar, manageBlacklist, v.v.). Chỉ 2 thay đổi:
+### 7.1 Thêm "ordinal" vào identifierType enum của các mutation tool
 
-### 7.1 Thêm 1 tool declaration mới + handler
+**File:** Tất cả file language functions (`english.ts`, `vietnamese.ts`, `spanish.ts`, ...)
+
+Thêm `"ordinal"` vào enum của các tool có identifierType:
+- `manageFollow`
+- `manageCalendar`
+- `manageBlacklist`
+- `rateConference`
+- `getConferenceFeedback`
+- `countConferenceFollowed`
+
+### 7.2 Thêm tool declaration mới `resolveConferenceRef` + handler
 
 - File: `src/chatbot/language/functions/english.ts` — thêm `englishResolveConferenceRefDeclaration`
 - File: `src/chatbot/language/functions/vietnamese.ts` — thêm tương tự
 - File: `src/chatbot/gemini/functionRegistry.ts` — register handler
 
-### 7.2 Thêm 1 đoạn trong system prompt (tất cả ngôn ngữ)
+### 7.3 Thêm 1 đoạn trong system prompt (tất cả ngôn ngữ)
 
 **File:** `src/chatbot/language/instructions/vietnamese.ts`
 **File:** `src/chatbot/language/instructions/english.ts`
@@ -389,14 +460,16 @@ Thêm đoạn (ví dụ tiếng Việt):
 ```
 Khi người dùng dùng tham chiếu mơ hồ như "thứ 2", "cái cuối", "cái đầu tiên"
 để chỉ một hội nghị trong danh sách kết quả tìm kiếm trước đó:
-1. Ưu tiên gọi trực tiếp tool quản lý (manageFollow, manageCalendar, manageBlacklist...)
-   với identifier là tham chiếu mơ hồ — hệ thống có thể tự động resolve.
-2. Nếu bị chặn với lỗi "ambiguity_blocked_mutation" hoặc "out_of_range_reference",
-   hãy dùng hàm resolveConferenceRef với:
-   - ordinal: tham chiếu số thứ tự từ người dùng (giữ nguyên)
-   - contextHint: mô tả ngắn kết quả tìm kiếm bạn nghĩ người dùng đang nói tới
-   - action: hành động người dùng muốn thực hiện
-3. Sau khi nhận được conferenceId từ resolveConferenceRef, gọi lại tool quản lý
+1. Chuyển đổi tham chiếu thành số:
+   - "thứ 2", "thứ hai" → 2
+   - "đầu tiên", "cái đầu" → 1
+   - "cuối", "cái cuối" → -1
+   - "thứ N" → N
+2. Gọi tool quản lý (manageFollow, manageCalendar, manageBlacklist...)
+   với identifierType="ordinal" và identifier là số vừa chuyển.
+3. Nếu bị chặn với lỗi "ambiguity_blocked_mutation", hãy dùng hàm
+   resolveConferenceRef với ordinal (số), contextHint, và action.
+4. Sau khi nhận được conferenceId từ resolveConferenceRef, gọi lại tool quản lý
    với identifier=conferenceId và identifierType="id".
 ```
 
@@ -417,6 +490,7 @@ db.result_set_states.createIndex(
 ```
 
 **Chính sách:**
+
 - TTL index trên `expiresAt` — MongoDB tự động xóa document sau 20 phút
 - `conversationId + queryText` là unique — ghi đè nếu trùng (cùng query thì chỉ giữ 1)
 - Không dùng SQL cho state này
@@ -427,13 +501,13 @@ db.result_set_states.createIndex(
 
 ### Error codes (giữ nguyên từ section 9 của plan gốc)
 
-| Error code | Khi nào |
-|---|---|
-| `stale_result_set` | Tất cả result set đều quá hạn |
-| `out_of_range_reference` | Ordinal vượt quá số lượng items trong tất cả list |
-| `ambiguity_blocked_mutation` | Nhiều list match ordinal — cần LLM resolve |
-| `missing_fields` | Thiếu identifier |
-| `invalid_tool_args` | Sai schema |
+| Error code                   | Khi nào                                           |
+| ---------------------------- | ------------------------------------------------- |
+| `stale_result_set`           | Tất cả result set đều quá hạn                     |
+| `out_of_range_reference`     | Ordinal vượt quá số lượng items trong tất cả list |
+| `ambiguity_blocked_mutation` | Nhiều list match ordinal — cần LLM resolve        |
+| `missing_fields`             | Thiếu identifier                                  |
+| `invalid_tool_args`          | Sai schema                                        |
 
 ### Format response
 
@@ -457,53 +531,53 @@ db.result_set_states.createIndex(
 
 ### ResultSetStateStore
 
-| # | Test case | Expected |
-|---|---|---|
-| 1 | save + getAllValid | Lưu 1 result set → getAllValid trả về đúng |
-| 2 | save với nhiều result set khác queryText | getAllValid trả về tất cả, mới nhất đầu |
-| 3 | getAllValid khi quá TTL | Trả về mảng rỗng |
-| 4 | getAllValid khi 1 cái hết hạn, 1 cái còn | Chỉ trả cái còn hạn |
-| 5 | save ghi đè khi trùng conversationId + queryText | Dữ liệu mới thay cũ |
-| 6 | save với orderedConferenceIds rỗng | Vẫn lưu được |
+| #   | Test case                                        | Expected                                   |
+| --- | ------------------------------------------------ | ------------------------------------------ |
+| 1   | save + getAllValid                               | Lưu 1 result set → getAllValid trả về đúng |
+| 2   | save với nhiều result set khác queryText         | getAllValid trả về tất cả, mới nhất đầu    |
+| 3   | getAllValid khi quá TTL                          | Trả về mảng rỗng                           |
+| 4   | getAllValid khi 1 cái hết hạn, 1 cái còn         | Chỉ trả cái còn hạn                        |
+| 5   | save ghi đè khi trùng conversationId + queryText | Dữ liệu mới thay cũ                        |
+| 6   | save với orderedConferenceIds rỗng               | Vẫn lưu được                               |
 
 ### ResultSetResolver (resolveAll)
 
-| # | Test case | Expected |
-|---|---|---|
-| 7 | 1 list, ordinal "thứ 2" → resolve được | uniqueMatch = conf_002 |
-| 8 | 2 list, ordinal match cả 2 | matches.length = 2, uniqueMatch = null |
-| 9 | 2 list, ordinal chỉ match được 1 | uniqueMatch = conf_xxx |
-| 10 | Ordinal "cuối" trên list 3 items | resolve ra item thứ 3 |
-| 11 | Ordinal "đầu tiên" | resolve ra item đầu |
-| 12 | Ordinal "thứ 5" trên list chỉ có 3 items | matches.length = 0 |
-| 13 | Không có result set nào | matches.length = 0 |
-| 14 | Tất cả result set stale | matches.length = 0 |
+| #   | Test case                                | Expected                               |
+| --- | ---------------------------------------- | -------------------------------------- |
+| 7   | 1 list, ordinal=2 → resolve được         | uniqueMatch = conf_002                 |
+| 8   | 2 list, ordinal=2 match cả 2             | matches.length = 2, uniqueMatch = null |
+| 9   | 2 list, ordinal=2 chỉ match được 1       | uniqueMatch = conf_xxx                 |
+| 10  | Ordinal=-1 (cuối) trên list 3 items      | resolve ra item thứ 3 (index 2)        |
+| 11  | Ordinal=1 (đầu tiên)                     | resolve ra item đầu (index 0)          |
+| 12  | Ordinal=5 trên list chỉ có 3 items       | matches.length = 0                     |
+| 13  | Không có result set nào                  | matches.length = 0                     |
+| 14  | Tất cả result set stale                  | matches.length = 0                     |
 
-### ResultSetResolver (resolveByQueryText)
+### ResultSetResolver (resolveByContext)
 
-| # | Test case | Expected |
-|---|---|---|
-| 15 | contextHint match chính xác queryText | resolved |
-| 16 | contextHint match fuzzy queryText | resolved (nếu implement fuzzy) |
-| 17 | contextHint không match gì | resolvedId = null |
-| 18 | contextHint match nhưng ordinal out of range | resolvedId = null |
+| #   | Test case                                                                            | Expected          |
+| --- | ------------------------------------------------------------------------------------ | ----------------- |
+| 15  | contextEmbedding vs queryEmbedding similarity > threshold                            | resolved          |
+| 16  | contextEmbedding vs queryEmbedding similarity < threshold                            | resolvedId = null |
+| 17  | contextHint paraphrase khác (e.g. "AI conferences" vs "AI list") nhưng embedding gần | resolved          |
+| 18  | Cosine similarity > threshold nhưng ordinal out of range                             | resolvedId = null |
 
 ### ResolveConferenceRefHandler
 
-| # | Test case | Expected |
-|---|---|---|
-| 19 | LLM gọi với đúng contextHint | Trả về resolved=true + conferenceId |
-| 20 | LLM gọi với contextHint sai | Fallback qua fuzzy → nếu vẫn sai → resolved=false |
-| 21 | LLM gọi với ordinal không hợp lệ | resolved=false |
+| #   | Test case                        | Expected                                           |
+| --- | -------------------------------- | -------------------------------------------------- |
+| 19  | LLM gọi với đúng contextHint     | Trả về resolved=true + conferenceId                |
+| 20  | LLM gọi với contextHint sai      | Fallback resolveAll → nếu vẫn sai → resolved=false |
+| 21  | LLM gọi với ordinal không hợp lệ | resolved=false                                     |
 
 ### Fast Path (preToolValidator)
 
-| # | Test case | Expected |
-|---|---|---|
-| 22 | manageFollow với identifier="thứ 2", chỉ 1 list | allowed=true, identifier bị thay bằng ID |
-| 23 | manageFollow với identifier="thứ 2", 2 list match | allowed=false, ambiguity_blocked_mutation |
-| 24 | manageFollow với identifier="thứ 2", 0 list match | allowed=false, out_of_range_reference |
-| 25 | manageFollow với identifier="ICML" (không phải ordinal) | Không chạy resolveAll, chạy hasAmbiguousReference cũ |
+| #   | Test case                                                          | Expected                                             |
+| --- | ------------------------------------------------------------------ | ---------------------------------------------------- |
+| 22  | manageFollow với identifier="2", identifierType="ordinal", 1 list  | allowed=true, identifier bị thay bằng ID             |
+| 23  | manageFollow với identifier="2", identifierType="ordinal", 2 list  | allowed=false, ambiguity_blocked_mutation            |
+| 24  | manageFollow với identifier="5", identifierType="ordinal", 0 list  | allowed=false, out_of_range_reference                |
+| 25  | manageFollow với identifier="ICML", identifierType="acronym"       | Không chạy resolveAll, chạy hasAmbiguousReference cũ |
 
 ---
 
@@ -517,9 +591,11 @@ User                    Orchestrator          preToolValidator      Resolver    
  |--- "follow thứ 2" ------>|                      |                   |                |
  |                           |--- LLM generate ---->|                   |                |
  |                           |   manageFollow       |                   |                |
- |                           |   ("thứ 2")          |                   |                |
+ |                           |   (identifier="2",   |                   |                |
+ |                           |    identifierType=   |                   |                |
+ |                           |    "ordinal")        |                   |                |
  |                           |                      |--- resolveAll --->|                |
- |                           |                      |                   |--- query ----->|
+ |                           |                      |   (ordinal=2)     |--- query ----->|
  |                           |                      |                   |<-- [state1] ---|
  |                           |                      |                   |                |
  |                           |                      |<-- uniqueMatch ---|                |
@@ -527,6 +603,7 @@ User                    Orchestrator          preToolValidator      Resolver    
  |                           |                      |                   |                |
  |                           |<-- allowed=true -----|                   |                |
  |                           |   identifier=conf_002|                   |                |
+ |                           |   identifierType=id  |                   |                |
  |                           |--- manageFollow ---->|                   |                |
  |                           |   (conf_002)         |                   |                |
  |<-- response --------------|                      |                   |                |
@@ -540,9 +617,11 @@ User                    Orchestrator          preToolValidator      Resolver    
  |--- "follow thứ 2" ------>|                      |                   |                |
  |                           |--- LLM generate ---->|                   |                |
  |                           |   manageFollow       |                   |                |
- |                           |   ("thứ 2")          |                   |                |
+ |                           |   (identifier="2",   |                   |                |
+ |                           |    identifierType=   |                   |                |
+ |                           |    "ordinal")        |                   |                |
  |                           |                      |--- resolveAll --->|                |
- |                           |                      |                   |--- query ----->|
+ |                           |                      |   (ordinal=2)     |--- query ----->|
  |                           |                      |                   |<-- [state1] ---|
  |                           |                      |                   |<-- [state2] ---|
  |                           |                      |<-- 2 matches -----|                |
@@ -553,7 +632,7 @@ User                    Orchestrator          preToolValidator      Resolver    
  |   LLM thấy block -> dùng tool resolveConferenceRef                   |                |
  |                           |                      |                   |                |
  |--- resolveConfRef ------->|                      |                   |                |
- |   (ordinal="thứ 2",       |--- handler call -----|                   |                |
+ |   (ordinal=2,             |--- handler call -----|                   |                |
  |    contextHint="AI confs")|                      |--- resolveBy ---->|                |
  |                           |                      |   QueryText()     |--- query ----->|
  |                           |                      |                   |<-- [state1] ---|
@@ -571,56 +650,89 @@ User                    Orchestrator          preToolValidator      Resolver    
 ## 12. Implementation Steps (Thứ tự code)
 
 ### Step 1: Tạo type/interface
+
 - File: `src/types/resultSetState.types.ts`
 - `ResultSetState`, `IResultSetStateStore`, `IResultSetResolver`, `ResolveResult`, `ResolveAllResult`
 
 ### Step 2: Tạo MongoDB model
+
 - File: `src/models/resultSetState.model.ts`
 - Mongoose schema + model + TTL index
 
 ### Step 3: Tạo ResultSetStateStore
+
+- ResultSetStateStore là tầng lưu trữ — chỉ biết CRUD MongoDB (save, getAllValid, clearConversation). Không có logic nghiệp vụ.
 - File: `src/services/resultSetState/store.service.ts`
 - Implement `IResultSetStateStore`: `save`, `getAllValid`, `clearConversation`
 - `getAllValid` phải lọc theo TTL (so sánh `expiresAt` với hiện tại)
 
 ### Step 4: Tạo ResultSetResolver
+
+- ResultSetResolver là tầng xử lý nghiệp vụ — nhận số (1-based) → chuyển thành index 0-based → dùng Store lấy danh sách → map ra ID conference. Nó cũng có resolveByContext dùng cosine similarity để match embedding với contextHint từ LLM.
 - File: `src/services/resultSetState/resolver.service.ts`
-- Implement `IResultSetResolver`: `resolveAll`, `resolveByContext`, `generateEmbedding`
-- `resolveByContext`: exact match queryText → fallback cosine similarity với queryEmbedding
-- `generateEmbedding`: kiểm tra codebase có sẵn embedding utility không (RetrievalService, Gemini embedding API, etc.), tái sử dụng nếu có
-- Core logic: parse ordinal ("thứ 2", "cuối", "đầu tiên", "thứ N") → index → get ID
+- Implement `IResultSetResolver`: `resolveAll`, `resolveByContext`
+- **KHÔNG implement `generateEmbedding`** — đã có sẵn `EmbeddingService.generateEmbedding()` trong codebase (`src/chatbot/services/rag/embeddingService.ts`), Resolver chỉ cần dùng `container.resolve(EmbeddingService)` để gọi
+- **Ordinal là `number`** (không phải string):
+  - `ordinal > 0`: đếm xuôi, 1-based → index = `ordinal - 1`
+  - `ordinal < 0`: đếm từ cuối, -1 = cuối → index = `length + ordinal`
+- `resolveByContext`:
+  - Dùng `EmbeddingService.generateEmbedding(contextHint)` để lấy `contextEmbedding` nếu cần (hoặc nhận sẵn từ param)
+  - Cosine similarity giữa `contextEmbedding` và `queryEmbedding` của từng result set
+  - Chọn result set có similarity > threshold (vd 0.7)
+  - Resolve số ordinal → index → resolve ID
+- Core logic: `ordinal → index → get ID`
+- **Dependency:** Inject `IResultSetStateStore` vào constructor — Resolver cần store để gọi `getAllValid()`
 
 ### Step 5: Unit test Store + Resolver
+
 - File: `src/services/resultSetState/__tests__/store.service.test.ts`
 - File: `src/services/resultSetState/__tests__/resolver.service.test.ts`
 
 ### Step 6: Export module
+
 - File: `src/services/resultSetState/index.ts`
 
 ### Step 7: Router Integration (Save)
-- File: `src/chatbot/handlers/retrieveKnowledge.handler.ts` (dòng ~165)
-- Inject `IResultSetStateStore` → gọi `save(conversationId, query, embedding, ids)`
 
-### Step 8: Fast Path Integration (preToolValidator)
+- File: `src/chatbot/handlers/retrieveKnowledge.handler.ts` (dòng ~165)
+- Inject `IResultSetStateStore` và `IResultSetResolver` vào constructor
+- Gọi `this.resultSetResolver.generateEmbedding(query)` để lấy embedding
+- Gọi `this.resultSetStateStore.save(conversationId, query, embedding, ids)`
+
+### Step 8: Thêm "ordinal" vào identifierType enum mutation tools
+
+- File: Tất cả file language functions (english.ts, vietnamese.ts, spanish.ts, ...)
+- Thêm `"ordinal"` vào enum `identifierType` của các tool:
+  `manageFollow`, `manageCalendar`, `manageBlacklist`, `rateConference`,
+  `getConferenceFeedback`, `countConferenceFollowed`
+
+### Step 9: Fast Path Integration (preToolValidator)
+
 - File: `src/chatbot/guards/preToolValidator.ts` (dòng ~500)
-- Thêm `isOrdinalReference()` check
-- Gọi `resultSetResolver.resolveAll()` trước `hasAmbiguousReference`
-- Nếu uniqueMatch → thay identifier, return allowed
+- Check `identifierType === "ordinal"` thay vì `isOrdinalReference()`
+- `parseInt(identifier)` để lấy số
+- Gọi `resultSetResolver.resolveAll(conversationId, ordinalNum)` — truyền number
+- Nếu uniqueMatch → thay identifier=ID, identifierType="id", return allowed
 - Nếu 0 match → return `out_of_range_reference`
 - Nếu nhiều match → fallback ambiguity check
 
-### Step 9: Tạo tool resolveConferenceRef
-- File: `src/chatbot/language/functions/english.ts` — thêm declaration
-- File: `src/chatbot/language/functions/vietnamese.ts` — thêm declaration
-- File: `src/chatbot/language/functions/spanish.ts` — thêm declaration
+### Step 10: Tạo tool resolveConferenceRef
+
+- File: `src/chatbot/language/functions/english.ts` — thêm declaration (ordinal là Type.NUMBER)
+- File: `src/chatbot/language/functions/vietnamese.ts` — thêm declaration (ordinal là Type.NUMBER)
+- File: `src/chatbot/language/functions/spanish.ts` — thêm declaration (ordinal là Type.NUMBER)
 - File: `src/chatbot/handlers/resolveConferenceRef.handler.ts` — handler
 - File: `src/chatbot/gemini/functionRegistry.ts` — register
 
-### Step 10: Update system prompt (tất cả ngôn ngữ)
+### Step 11: Update system prompt (tất cả ngôn ngữ)
+
 - File: `src/chatbot/language/instructions/english.ts`
 - File: `src/chatbot/language/instructions/vietnamese.ts`
 - File: `src/chatbot/language/instructions/spanish.ts`
-- Thêm hướng dẫn dùng resolveConferenceRef khi bị ambiguity_blocked
+- Thêm hướng dẫn:
+  1. Chuyển "thứ 2", "cuối", "đầu tiên" → số (2, -1, 1)
+  2. Gọi mutation tool với identifierType="ordinal"
+  3. Nếu bị ambiguity_blocked → dùng resolveConferenceRef
 
 ---
 
@@ -635,7 +747,7 @@ src/
   services/
     resultSetState/
       store.service.ts                  # IResultSetStateStore
-      resolver.service.ts               # IResultSetResolver (resolveAll, resolveByQueryText)
+      resolver.service.ts               # IResultSetResolver (resolveAll, resolveByContext)
       index.ts                          # Export
       __tests__/
         store.service.test.ts
@@ -655,7 +767,7 @@ src/
     gemini/
       functionRegistry.ts               # + register resolveConferenceRef
     guards/
-      preToolValidator.ts               # + Fast Path (resolveAll trước ambiguity check)
+      preToolValidator.ts               # + Fast Path (check identifierType === "ordinal")
 ```
 
 ---
@@ -665,8 +777,8 @@ src/
 - [x] Module `ResultSetStateStore` lưu/đọc result set trên MongoDB
 - [x] TTL index hoạt động (document tự xóa sau 20 phút)
 - [x] `getAllValid()` trả đúng result set còn hạn, không trả stale
-- [x] Module `ResultSetResolver.resolveAll()` quét tất cả result set, trả uniqueMatch hoặc null
-- [x] Module `ResultSetResolver.resolveByContext()` match contextHint với queryText (exact) + queryEmbedding (cosine similarity)
+- [x] Module `ResultSetResolver.resolveAll(ordinal: number)` quét tất cả result set, resolve số 1-based (dương = xuôi, âm = ngược) → trả uniqueMatch hoặc null
+- [x] Module `ResultSetResolver.resolveByContext()` match contextEmbedding với queryEmbedding bằng cosine similarity
 - [x] Module `ResultSetResolver.generateEmbedding()` tái sử dụng embedding service có sẵn
 - [x] Router gọi `save()` khi có list mode query (retrieveKnowledge.handler.ts)
 - [x] Fast Path: preToolValidator chạy resolveAll trước ambiguity check
@@ -677,7 +789,7 @@ src/
 - [x] Tool `resolveConferenceRef` có handler hoạt động đúng
 - [x] Tool `resolveConferenceRef` được register trong functionRegistry
 - [x] System prompt được cập nhật (tất cả ngôn ngữ)
-- [x] Không sửa bất kỳ tool declaration cũ nào (manageFollow, manageCalendar, v.v.)
+- [x] Đã thêm `"ordinal"` vào identifierType enum của tất cả mutation tools (manageFollow, manageCalendar, v.v.)
 - [x] Unit test pass cho Store + Resolver + Fast Path
 - [x] `stale_result_set` trả đúng format error code chuẩn
 
@@ -685,9 +797,9 @@ src/
 
 ## 15. Phụ thuộc
 
-| Phụ thuộc | Ghi chú |
-|---|---|
-| MongoDB connection | Đã có trong codebase, collection mới `result_set_states` |
-| Conversation ID | Cần confirm cách lấy từ context hiện tại |
-| Ordinal parser | Module parse "thứ 2", "cuối", "đầu tiên", "top N" |
+| Phụ thuộc              | Ghi chú                                                          |
+| ---------------------- | ---------------------------------------------------------------- |
+| MongoDB connection     | Đã có trong codebase, collection mới `result_set_states`         |
+| Conversation ID        | Cần confirm cách lấy từ context hiện tại                         |
+| Ordinal parser         | Resolve số 1-based (dương + âm) → index — đơn giản, không cần NLP |
 | Fuzzy match (optional) | Dùng cho Step 3 của resolveConferenceRef handler (có thể để sau) |
