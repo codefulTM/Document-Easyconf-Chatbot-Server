@@ -13,12 +13,12 @@ Tạo một module lưu trạng thái danh sách kết quả conference theo con
 
 **Cách tiếp cận:** LLM truyền `identifierType="ordinal"` với `identifier` là số (1-based, âm cho đếm từ cuối). Resolver xử lý số → index 0-based → lấy ID từ list thật.
 
-| identifier | Ý nghĩa |
-|---|---|
-| `1` | Phần tử đầu tiên |
-| `2` | Phần tử thứ 2 |
-| `-1` | Phần tử cuối |
-| `-2` | Phần tử áp cuối |
+| identifier | Ý nghĩa          |
+| ---------- | ---------------- |
+| `1`        | Phần tử đầu tiên |
+| `2`        | Phần tử thứ 2    |
+| `-1`       | Phần tử cuối     |
+| `-2`       | Phần tử áp cuối  |
 
 ---
 
@@ -228,7 +228,7 @@ class ResolveConferenceRefHandler implements IFunctionHandler {
   async execute(context: FunctionHandlerInput): Promise<FunctionHandlerOutput> {
     const { args } = context;
     const conversationId = this.extractConversationId(context);
-    const ordinal = args.ordinal as number;       // number, 1-based
+    const ordinal = args.ordinal as number; // number, 1-based
     const contextHint = args.contextHint as string;
 
     // Sinh embedding cho contextHint để semantic matching
@@ -390,25 +390,9 @@ if (isMutatingAction) {
 
 ### 6.3 Fast Path — Cập nhật identifierType enum trong tool declarations cũ
 
-**File:** Tất cả các file language functions (`english.ts`, `vietnamese.ts`, `spanish.ts`, ...)
+**File:** `src/chatbot/language/functions/english.ts` (chỉ có 1 file function declaration — các ngôn ngữ khác không có file riêng).
 
-Thêm `"ordinal"` vào enum `identifierType` của các mutation tool:
-- `manageFollow`
-- `manageCalendar`
-- `manageBlacklist`
-- `rateConference`
-- `getConferenceFeedback`
-- `countConferenceFollowed`
-
-```typescript
-identifierType: {
-  type: Type.STRING,
-  enum: ["acronym", "title", "id", "ordinal"],  // + "ordinal"
-  description: "...",
-}
-```
-
-Việc này cho phép Gemini sinh `identifierType="ordinal"` khi user dùng số thứ tự.
+Thêm `"ordinal"` vào enum `identifierType` và cập nhật `description` của cả `identifierType` và `identifier` trong 6 mutation tool declarations để hướng dẫn LLM cách dùng ordinal (chi tiết ở Step 8).
 
 ### 6.4 Slow Path Integration (tool resolveConferenceRef)
 
@@ -431,17 +415,17 @@ MemoryManagerLite
 
 ## 7. Thay đổi cần thiết
 
-### 7.1 Thêm "ordinal" vào identifierType enum của các mutation tool
+### 7.1 Cập nhật function declarations — identifierType + identifier descriptions
 
-**File:** Tất cả file language functions (`english.ts`, `vietnamese.ts`, `spanish.ts`, ...)
+**File:** `src/chatbot/language/functions/english.ts` (chỉ có 1 file function declaration)
 
-Thêm `"ordinal"` vào enum của các tool có identifierType:
-- `manageFollow`
-- `manageCalendar`
-- `manageBlacklist`
-- `rateConference`
-- `getConferenceFeedback`
-- `countConferenceFollowed`
+Cập nhật 6 mutation tools: `manageFollow`, `manageCalendar`, `manageBlacklist`, `rateConference`, `getConferenceFeedback`, `countConferenceFollowed`.
+
+Mỗi tool cần 3 thay đổi:
+
+1. **Enum:** Thêm `"ordinal"` vào `identifierType.enum`
+2. **`identifierType.description`:** Mở rộng để giải thích khi nào dùng ordinal
+3. **`identifier.description`:** Mở rộng để giải thích format số khi ordinal
 
 ### 7.2 Thêm tool declaration mới `resolveConferenceRef` + handler
 
@@ -542,16 +526,16 @@ db.result_set_states.createIndex(
 
 ### ResultSetResolver (resolveAll)
 
-| #   | Test case                                | Expected                               |
-| --- | ---------------------------------------- | -------------------------------------- |
-| 7   | 1 list, ordinal=2 → resolve được         | uniqueMatch = conf_002                 |
-| 8   | 2 list, ordinal=2 match cả 2             | matches.length = 2, uniqueMatch = null |
-| 9   | 2 list, ordinal=2 chỉ match được 1       | uniqueMatch = conf_xxx                 |
-| 10  | Ordinal=-1 (cuối) trên list 3 items      | resolve ra item thứ 3 (index 2)        |
-| 11  | Ordinal=1 (đầu tiên)                     | resolve ra item đầu (index 0)          |
-| 12  | Ordinal=5 trên list chỉ có 3 items       | matches.length = 0                     |
-| 13  | Không có result set nào                  | matches.length = 0                     |
-| 14  | Tất cả result set stale                  | matches.length = 0                     |
+| #   | Test case                           | Expected                               |
+| --- | ----------------------------------- | -------------------------------------- |
+| 7   | 1 list, ordinal=2 → resolve được    | uniqueMatch = conf_002                 |
+| 8   | 2 list, ordinal=2 match cả 2        | matches.length = 2, uniqueMatch = null |
+| 9   | 2 list, ordinal=2 chỉ match được 1  | uniqueMatch = conf_xxx                 |
+| 10  | Ordinal=-1 (cuối) trên list 3 items | resolve ra item thứ 3 (index 2)        |
+| 11  | Ordinal=1 (đầu tiên)                | resolve ra item đầu (index 0)          |
+| 12  | Ordinal=5 trên list chỉ có 3 items  | matches.length = 0                     |
+| 13  | Không có result set nào             | matches.length = 0                     |
+| 14  | Tất cả result set stale             | matches.length = 0                     |
 
 ### ResultSetResolver (resolveByContext)
 
@@ -572,12 +556,12 @@ db.result_set_states.createIndex(
 
 ### Fast Path (preToolValidator)
 
-| #   | Test case                                                          | Expected                                             |
-| --- | ------------------------------------------------------------------ | ---------------------------------------------------- |
-| 22  | manageFollow với identifier="2", identifierType="ordinal", 1 list  | allowed=true, identifier bị thay bằng ID             |
-| 23  | manageFollow với identifier="2", identifierType="ordinal", 2 list  | allowed=false, ambiguity_blocked_mutation            |
-| 24  | manageFollow với identifier="5", identifierType="ordinal", 0 list  | allowed=false, out_of_range_reference                |
-| 25  | manageFollow với identifier="ICML", identifierType="acronym"       | Không chạy resolveAll, chạy hasAmbiguousReference cũ |
+| #   | Test case                                                         | Expected                                             |
+| --- | ----------------------------------------------------------------- | ---------------------------------------------------- |
+| 22  | manageFollow với identifier="2", identifierType="ordinal", 1 list | allowed=true, identifier bị thay bằng ID             |
+| 23  | manageFollow với identifier="2", identifierType="ordinal", 2 list | allowed=false, ambiguity_blocked_mutation            |
+| 24  | manageFollow với identifier="5", identifierType="ordinal", 0 list | allowed=false, out_of_range_reference                |
+| 25  | manageFollow với identifier="ICML", identifierType="acronym"      | Không chạy resolveAll, chạy hasAmbiguousReference cũ |
 
 ---
 
@@ -699,12 +683,59 @@ User                    Orchestrator          preToolValidator      Resolver    
 - Gọi `this.resultSetResolver.generateEmbedding(query)` để lấy embedding
 - Gọi `this.resultSetStateStore.save(conversationId, query, embedding, ids)`
 
-### Step 8: Thêm "ordinal" vào identifierType enum mutation tools
+### Step 8: Cập nhật function declarations — identifierType + identifier descriptions
 
-- File: Tất cả file language functions (english.ts, vietnamese.ts, spanish.ts, ...)
-- Thêm `"ordinal"` vào enum `identifierType` của các tool:
-  `manageFollow`, `manageCalendar`, `manageBlacklist`, `rateConference`,
-  `getConferenceFeedback`, `countConferenceFollowed`
+**File:** `src/chatbot/language/functions/english.ts` (chỉ có 1 file function declaration)
+
+**Tool cần sửa:** `manageFollow`, `manageCalendar`, `manageBlacklist`, `rateConference`, `getConferenceFeedback`, `countConferenceFollowed`.
+
+Mỗi tool cần **3 thay đổi**:
+
+#### a) `identifierType.enum` — thêm `"ordinal"`
+
+```typescript
+// Before:
+enum: ["acronym", "title", "id"],
+// After:
+enum: ["acronym", "title", "id", "ordinal"],
+```
+
+#### b) `identifierType.description` — giải thích khi nào dùng ordinal
+
+Description hiện tại chỉ nói `"The type of the identifier."` hoặc `"The type of the identifier. Required for 'follow'/'unfollow'."`. Cần mở rộng:
+
+```
+"The type of the identifier: 'acronym', 'title', 'id', or 'ordinal'. "
++ "Use 'ordinal' when the user refers to a conference by position in a previous result list "
++ "(e.g., 'the 2nd one', 'the last one', 'the first conference'). "
++ "When 'ordinal', the identifier must be a number (see identifier description)."
+```
+
+#### c) `identifier.description` — hướng dẫn format identifier khi ordinal
+
+Description hiện tại chỉ nói `"A unique identifier for the conference (e.g., acronym, title, ID)."`. Cần thêm:
+
+```
+"A unique identifier for the conference. "
++ "When identifierType is 'ordinal', this must be a number: "
++ "positive = count from start (1 = first, 2 = second), "
++ "negative = count from end (-1 = last, -2 = second to last). "
++ "Examples: identifier='2' with identifierType='ordinal' means 'the 2nd conference in the list'. "
++ "When identifierType is 'acronym'/'title'/'id', provide the actual value as usual."
+```
+
+#### Bảng mapping: user nói → identifier/identifierType
+
+Khi user dùng tham chiếu vị trí, LLM chuyển đổi như sau:
+
+| User nói                        | identifier | identifierType |
+| ------------------------------- | ---------- | -------------- |
+| "cái đầu tiên", "the first one" | `"1"`      | `"ordinal"`    |
+| "cái thứ 2", "the 2nd one"      | `"2"`      | `"ordinal"`    |
+| "cái cuối", "the last one"      | `"-1"`     | `"ordinal"`    |
+| "cái áp cuối", "second to last" | `"-2"`     | `"ordinal"`    |
+
+LLM tự chuyển đổi tham chiếu → số trước khi gọi tool, không cần regex/parser ở backend.
 
 ### Step 9: Fast Path Integration (preToolValidator)
 
@@ -716,23 +747,38 @@ User                    Orchestrator          preToolValidator      Resolver    
 - Nếu 0 match → return `out_of_range_reference`
 - Nếu nhiều match → fallback ambiguity check
 
-### Step 10: Tạo tool resolveConferenceRef
+### Step 10: Slow Path Integration — tạo tool resolveConferenceRef
+
+Khi Fast Path (Step 9) block với `ambiguity_blocked_mutation`, LLM fallback sang dùng tool `resolveConferenceRef` (Slow Path).
 
 - File: `src/chatbot/language/functions/english.ts` — thêm declaration (ordinal là Type.NUMBER)
-- File: `src/chatbot/language/functions/vietnamese.ts` — thêm declaration (ordinal là Type.NUMBER)
-- File: `src/chatbot/language/functions/spanish.ts` — thêm declaration (ordinal là Type.NUMBER)
-- File: `src/chatbot/handlers/resolveConferenceRef.handler.ts` — handler
-- File: `src/chatbot/gemini/functionRegistry.ts` — register
+- File: `src/chatbot/handlers/resolveConferenceRef.handler.ts` — handler dùng `resolveByContext()` để semantic match
+- File: `src/chatbot/gemini/functionRegistry.ts` — register handler
 
-### Step 11: Update system prompt (tất cả ngôn ngữ)
+### Step 11: Cập nhật system prompt (tối thiểu) + error message (chính)
+
+#### a) System prompt — chỉ 2 mục đầu (bắt buộc)
 
 - File: `src/chatbot/language/instructions/english.ts`
 - File: `src/chatbot/language/instructions/vietnamese.ts`
-- File: `src/chatbot/language/instructions/spanish.ts`
-- Thêm hướng dẫn:
+- Thêm hướng dẫn (ngắn gọn, 1-2 dòng):
   1. Chuyển "thứ 2", "cuối", "đầu tiên" → số (2, -1, 1)
   2. Gọi mutation tool với identifierType="ordinal"
-  3. Nếu bị ambiguity_blocked → dùng resolveConferenceRef
+
+#### b) Error message `ambiguity_blocked_mutation` — hướng dẫn fallback
+
+Không đưa edge case hiếm vào system prompt. Thay vào đó, trong error message trả về từ preToolValidator, thêm hướng dẫn LLM dùng `resolveConferenceRef`:
+
+```
+"Multiple result lists match this ordinal reference. "
++ "Use the resolveConferenceRef tool with ordinal=<number>. "
++ "If the user mentioned which search result list they are referring to (e.g., 'in the AI conference list'), "
++ "pass that as contextHint. If the user only said something like 'follow the 2nd conference' without "
++ "describing the list, pass contextHint=null. "
++ "The system will try to match automatically even without contextHint."
+```
+
+Lợi ích: chỉ tốn token khi edge case actually xảy ra, tự động hỗ trợ mọi ngôn ngữ, maintenance-free.
 
 ---
 
@@ -797,9 +843,9 @@ src/
 
 ## 15. Phụ thuộc
 
-| Phụ thuộc              | Ghi chú                                                          |
-| ---------------------- | ---------------------------------------------------------------- |
-| MongoDB connection     | Đã có trong codebase, collection mới `result_set_states`         |
-| Conversation ID        | Cần confirm cách lấy từ context hiện tại                         |
+| Phụ thuộc              | Ghi chú                                                           |
+| ---------------------- | ----------------------------------------------------------------- |
+| MongoDB connection     | Đã có trong codebase, collection mới `result_set_states`          |
+| Conversation ID        | Cần confirm cách lấy từ context hiện tại                          |
 | Ordinal parser         | Resolve số 1-based (dương + âm) → index — đơn giản, không cần NLP |
-| Fuzzy match (optional) | Dùng cho Step 3 của resolveConferenceRef handler (có thể để sau) |
+| Fuzzy match (optional) | Dùng cho Step 3 của resolveConferenceRef handler (có thể để sau)  |
