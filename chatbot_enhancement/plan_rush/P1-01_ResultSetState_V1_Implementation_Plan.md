@@ -5,7 +5,7 @@
 **Mã work package:** R1-01
 **Ưu tiên:** Số 1 (cao nhất)
 **Scope:** In-scope (bắt buộc)
-**Liên quan tới:** P1-02 (Resolver — module mới), P2-04 (3-Layer Memory — Warm Memory), system prompt (hướng dẫn LLM dùng tool resolveConferenceRef)
+**Liên quan tới:** P1-02 (Resolver — module mới), P2-04 (3-Layer Memory — Warm Memory), system prompt (hướng dẫn ConferenceAgent dùng tool resolveConferenceRef + HostAgent route task)
 
 ### Mục tiêu
 
@@ -43,16 +43,16 @@ LLM gọi tool mutating với `identifierType="ordinal"`. preToolValidator tự 
 
 ### Tầng 2: Slow Path — Tool mới `resolveConferenceRef` (cho trường hợp mơ hồ)
 
-Khi Tầng 1 block với `ambiguity_blocked_mutation`, LLM thấy lỗi → dùng tool `resolveConferenceRef` cung cấp thêm ngữ cảnh.
+Khi Tầng 1 block với `ambiguity_blocked_mutation`, **sub-agent (ConferenceAgent)** thấy lỗi → dùng tool `resolveConferenceRef` cung cấp thêm ngữ cảnh → retry mutation với resolved ID.
 
 ```
-[LLM] thấy ambiguity_blocked_mutation
+[ConferenceAgent] thấy ambiguity_blocked_mutation error
   → gọi resolveConferenceRef(ordinal=2, contextHint="AI conferences")
     → handler cosine similarity match với queryEmbedding
     → resolve ra conf_002
-    → trả về
-  → LLM gọi manageFollow(identifier="conf_002", identifierType="id")
-    → preToolValidator thấy ID thật → pass  ✅ 2 turns (nhưng hiếm)
+    → trả về resolved ID
+  → retry manageFollow(identifier="conf_002", identifierType="id")
+    → preToolValidator thấy ID thật → pass  ✅ 3 turns (trong cùng sub-agent loop)
 ```
 
 ### Tổng kết: Resolve Strategy
@@ -394,14 +394,15 @@ if (isMutatingAction) {
 
 Thêm `"ordinal"` vào enum `identifierType` và cập nhật `description` của cả `identifierType` và `identifier` trong 6 mutation tool declarations để hướng dẫn LLM cách dùng ordinal (chi tiết ở Step 8).
 
-### 6.4 Slow Path Integration (tool resolveConferenceRef)
+### 6.4 Slow Path Integration (tool resolveConferenceRef — ConferenceAgent only)
 
-**File:** `src/chatbot/language/functions/english.ts` (và các file language khác)
-**File:** `src/chatbot/gemini/functionRegistry.ts`
+**Approach B:** `resolveConferenceRef` chỉ thuộc về ConferenceAgent, không phải HostAgent.
 
 - Thêm tool declaration mới `resolveConferenceRef` (xem Section 5)
 - Register handler trong functionRegistry
-- System prompt: thêm 1 đoạn hướng dẫn LLM dùng tool này
+- **languageConfig.ts:** Thêm `resolveConferenceRef` vào `functionGroups.conferenceManagement` (ConferenceAgent), KHÔNG thêm vào `core` (HostAgent)
+- **ConferenceAgent system prompt:** thêm đoạn hướng dẫn dùng tool này khi bị ambiguity block
+- **HostAgent system prompt:** thay vì hướng dẫn dùng resolveConferenceRef, hướng dẫn route task cho ConferenceAgent
 
 ### 6.5 Warm Memory Integration (P2-04)
 
@@ -429,31 +430,50 @@ Mỗi tool cần 3 thay đổi:
 
 ### 7.2 Thêm tool declaration mới `resolveConferenceRef` + handler
 
+**Approach B:** Tool này chỉ thuộc về ConferenceAgent.
+
 - File: `src/chatbot/language/functions/english.ts` — thêm `englishResolveConferenceRefDeclaration`
 - File: `src/chatbot/language/functions/vietnamese.ts` — thêm tương tự
+- File: `src/chatbot/language/functions/spanish.ts` — thêm tương tự
 - File: `src/chatbot/gemini/functionRegistry.ts` — register handler
+- File: `src/chatbot/language/config/languageConfig.ts` — thêm vào `functionGroups.conferenceManagement`, KHÔNG thêm vào `core`
 
-### 7.3 Thêm 1 đoạn trong system prompt (tất cả ngôn ngữ)
+### 7.3 Thêm system prompt (phân biệt HostAgent vs ConferenceAgent)
 
-**File:** `src/chatbot/language/instructions/vietnamese.ts`
+#### HostAgent — routing instruction
+
 **File:** `src/chatbot/language/instructions/english.ts`
+**File:** `src/chatbot/language/instructions/vietnamese.ts`
 **File:** `src/chatbot/language/instructions/spanish.ts`
 
-Thêm đoạn (ví dụ tiếng Việt):
+HostAgent KHÔNG gọi mutation tool với ordinal. Thay vào đó:
 
 ```
-Khi người dùng dùng tham chiếu mơ hồ như "thứ 2", "cái cuối", "cái đầu tiên"
+Khi người dùng dùng tham chiếu vị trí (e.g., "thứ 2", "cái cuối", "cái đầu tiên")
+để chỉ một hội nghị trong danh sách kết quả tìm kiếm trước đó:
+- Chuyển đổi tham chiếu thành số (2, -1, 1)
+- Gửi toàn bộ yêu cầu cho ConferenceAgent. ConferenceAgent sẽ thực hiện
+  mutation với ordinal và xử lý nếu bị mơ hồ.
+```
+
+#### ConferenceAgent — chi tiết ordinal flow
+
+**File:** `src/chatbot/language/instructions/english.ts` (section riêng cho ConferenceAgent)
+**File:** `src/chatbot/language/instructions/vietnamese.ts` (section riêng cho ConferenceAgent)
+**File:** `src/chatbot/language/instructions/spanish.ts` (section riêng cho ConferenceAgent)
+
+```
+Khi người dùng dùng tham chiếu vị trí (e.g., "thứ 2", "cái cuối", "cái đầu tiên")
 để chỉ một hội nghị trong danh sách kết quả tìm kiếm trước đó:
 1. Chuyển đổi tham chiếu thành số:
    - "thứ 2", "thứ hai" → 2
    - "đầu tiên", "cái đầu" → 1
    - "cuối", "cái cuối" → -1
    - "thứ N" → N
-2. Gọi tool quản lý (manageFollow, manageCalendar, manageBlacklist...)
-   với identifierType="ordinal" và identifier là số vừa chuyển.
+2. Gọi mutation tool với identifierType="ordinal" và identifier là số.
 3. Nếu bị chặn với lỗi "ambiguity_blocked_mutation", hãy dùng hàm
    resolveConferenceRef với ordinal (số), contextHint, và action.
-4. Sau khi nhận được conferenceId từ resolveConferenceRef, gọi lại tool quản lý
+4. Sau khi nhận được conferenceId từ resolveConferenceRef, gọi lại mutation tool
    với identifier=conferenceId và identifierType="id".
 ```
 
@@ -593,40 +613,47 @@ User                    Orchestrator          preToolValidator      Resolver    
  |<-- response --------------|                      |                   |                |
 ```
 
-### Slow Path (2 turns, khi mơ hồ thật sự)
+### Slow Path (Approach B — ConferenceAgent xử lý trong sub-agent loop)
 
 ```
-User                    Orchestrator          preToolValidator      Resolver          MongoDB
- |                           |                      |                   |                |
- |--- "follow thứ 2" ------>|                      |                   |                |
- |                           |--- LLM generate ---->|                   |                |
- |                           |   manageFollow       |                   |                |
- |                           |   (identifier="2",   |                   |                |
- |                           |    identifierType=   |                   |                |
- |                           |    "ordinal")        |                   |                |
- |                           |                      |--- resolveAll --->|                |
- |                           |                      |   (ordinal=2)     |--- query ----->|
- |                           |                      |                   |<-- [state1] ---|
- |                           |                      |                   |<-- [state2] ---|
- |                           |                      |<-- 2 matches -----|                |
- |                           |                      |                   |                |
- |                           |<-- BLOCK ------------|                   |                |
- |                           |   ambiguity_blocked  |                   |                |
- |                           |                      |                   |                |
- |   LLM thấy block -> dùng tool resolveConferenceRef                   |                |
- |                           |                      |                   |                |
- |--- resolveConfRef ------->|                      |                   |                |
- |   (ordinal=2,             |--- handler call -----|                   |                |
- |    contextHint="AI confs")|                      |--- resolveBy ---->|                |
- |                           |                      |   QueryText()     |--- query ----->|
- |                           |                      |                   |<-- [state1] ---|
- |                           |                      |<-- conf_002 ------|                |
- |                           |<-- conf_002 ---------|                   |                |
- |                           |                      |                   |                |
- |   LLM có ID thật -> gọi manageFollow(conf_002, "id")                |                |
- |                           |--- manageFollow ---->|                   |                |
- |                           |   (conf_002)         |                   |                |
- |<-- response --------------|                      |                   |                |
+User              HostAgent        ConferenceAgent    preToolValidator      Resolver          MongoDB
+ |                    |                   |                 |                   |                |
+ |--- "follow ------>|                   |                 |                   |                |
+ |     thứ 2"        |                   |                 |                   |                |
+ |                    |--- route task --->|                 |                   |                |
+ |                    |    to Conference  |                 |                   |                |
+ |                    |    Agent          |                 |                   |                |
+ |                    |                   |--- manageFollow(|                   |                |
+ |                    |                   |    identifier=  |                   |                |
+ |                    |                   |    "2",         |                   |                |
+ |                    |                   |    identifierTy |                   |                |
+ |                    |                   |    ="ordinal")  |                   |                |
+ |                    |                   |                 |--- resolveAll --->|                |
+ |                    |                   |                 |   (ordinal=2)     |--- query ----->|
+ |                    |                   |                 |                   |<-- [state1] ---|
+ |                    |                   |                 |                   |<-- [state2] ---|
+ |                    |                   |                 |<-- 2 matches -----|                |
+ |                    |                   |                 |                   |                |
+ |                    |                   |<-- BLOCK -------|                   |                |
+ |                    |                   |   ambiguity_    |                   |                |
+ |                    |                   |   blocked       |                   |                |
+ |                    |                   |                 |                   |                |
+ |  ConferenceAgent thấy block -> gọi resolveConferenceRef                     |                |
+ |                    |                   |                 |                   |                |
+ |                    |                   |--- resolveConf- |                   |                |
+ |                    |                   |    Ref(ordinal=2,|                   |                |
+ |                    |                   |    contextHint=  |--- resolveBy ---->|                |
+ |                    |                   |    "AI confs")   |   Context()       |--- query ----->|
+ |                    |                   |                 |                   |<-- [state1] ---|
+ |                    |                   |                 |<-- conf_002 ------|                |
+ |                    |                   |<-- conf_002 ----|                   |                |
+ |                    |                   |                 |                   |                |
+ |  ConferenceAgent có ID -> retry manageFollow(conf_002, "id")                |                |
+ |                    |                   |--- manageFollow(|                   |                |
+ |                    |                   |    conf_002)    |                   |                |
+ |                    |                   |                 |--- allowed:true ->|                |
+ |                    |                   |<-- success -----|                   |                |
+ |<-- response -------|                   |                 |                   |                |
 ```
 
 ---
@@ -747,27 +774,116 @@ LLM tự chuyển đổi tham chiếu → số trước khi gọi tool, không c
 - Nếu 0 match → return `out_of_range_reference`
 - Nếu nhiều match → fallback ambiguity check
 
-### Step 10: Slow Path Integration — tạo tool resolveConferenceRef
+### Step 10: Slow Path Integration — tạo tool resolveConferenceRef (ConferenceAgent only)
 
-Khi Fast Path (Step 9) block với `ambiguity_blocked_mutation`, LLM fallback sang dùng tool `resolveConferenceRef` (Slow Path).
+#### a) Tool ownership (Approach B)
 
-- File: `src/chatbot/language/functions/english.ts` — thêm declaration (ordinal là Type.NUMBER)
-- File: `src/chatbot/handlers/resolveConferenceRef.handler.ts` — handler dùng `resolveByContext()` để semantic match
-- File: `src/chatbot/gemini/functionRegistry.ts` — register handler
+- `resolveConferenceRef` chỉ được gắn cho **ConferenceAgent** (qua `functionGroups.conferenceManagement`)
+- **HostAgent KHÔNG có** `resolveConferenceRef` — HostAgent chỉ có mutation tools
+- ConferenceAgent có **cả mutation tools** (manageFollow, manageCalendar, ...) **và** `resolveConferenceRef`
+- Khi preToolValidator block mutation với `ambiguity_blocked_mutation`, ConferenceAgent tự xử lý trong sub-agent loop: thấy error → gọi `resolveConferenceRef` → retry mutation với resolved ID
+- HostAgent không cần biết về `resolveConferenceRef` — nếu HostAgent gặp ambiguity, nó route toàn bộ task cho ConferenceAgent
 
-### Step 11: Cập nhật system prompt (tối thiểu) + error message (chính)
+#### b) Các bước thực hiện
 
-#### a) System prompt — chỉ 2 mục đầu (bắt buộc)
+1. **Thêm declaration** (các file ngôn ngữ)
+   - `src/chatbot/language/functions/english.ts` — thêm `englishResolveConferenceRefDeclaration` (ordinal là `Type.NUMBER`)
 
-- File: `src/chatbot/language/instructions/english.ts`
-- File: `src/chatbot/language/instructions/vietnamese.ts`
-- Thêm hướng dẫn (ngắn gọn, 1-2 dòng):
-  1. Chuyển "thứ 2", "cuối", "đầu tiên" → số (2, -1, 1)
-  2. Gọi mutation tool với identifierType="ordinal"
+2. **Tạo handler** — `src/chatbot/handlers/resolveConferenceRef.handler.ts`
+   - Handler dùng `resolveByContext()` để semantic match (xem Section 5.2)
+   - Không cần thay đổi gì — handler đã hoạt động độc lập với agent nào gọi
 
-#### b) Error message `ambiguity_blocked_mutation` — hướng dẫn fallback
+3. **Register handler** — `src/chatbot/gemini/functionRegistry.ts`
 
-Không đưa edge case hiếm vào system prompt. Thay vào đó, trong error message trả về từ preToolValidator, thêm hướng dẫn LLM dùng `resolveConferenceRef`:
+   ```typescript
+   resolveConferenceRef: new ResolveConferenceRefHandler(),
+   ```
+
+4. **Cập nhật languageConfig.ts** — `src/chatbot/language/config/languageConfig.ts`
+
+   ```typescript
+   // functionGroups.conferenceManagement — ConferenceAgent nhận cả mutation + resolve
+   conferenceManagement: [
+     "manageFollow",
+     "manageCalendar",
+     "manageBlacklist",
+     "rateConference",
+     "getConferenceFeedback",
+     "countConferenceFollowed",
+     "resolveConferenceRef",   // <<< THÊM: chỉ ConferenceAgent có
+   ],
+
+   // core — HostAgent có mutation tools nhưng KHÔNG có resolveConferenceRef
+   core: [
+     "manageFollow",
+     "manageCalendar",
+     "manageBlacklist",
+     "rateConference",
+     "getConferenceFeedback",
+     "countConferenceFollowed",
+     // KHÔNG thêm resolveConferenceRef vào đây
+   ],
+   ```
+
+   - Thêm `resolveConferenceRef` vào `functionGroups.conferenceManagement`
+   - Đảm bảo `resolveConferenceRef` KHÔNG có trong `core` group
+
+5. **HostAgent handler — KHÔNG cần thay đổi**
+   - Không thêm else-if branch cho `resolveConferenceRef` trong HostAgent handler
+   - HostAgent gặp ambiguity error → instruction bảo nó route task cho ConferenceAgent
+   - Sub-agent handler (`subAgent.handler.ts`) đã hỗ trợ multi-turn loop, ConferenceAgent tự động nhận function call results (kể cả error) và gọi tool khác ở turn tiếp theo
+
+#### c) Luồng xử lý chi tiết
+
+```
+[HOST AGENT] User: "follow thứ 2"
+  → HostAgent thấy positional reference → route to ConferenceAgent
+
+[ConferenceAgent - Turn 1] manageFollow(identifier="2", identifierType="ordinal")
+  → preToolValidator: resolveAll → nhiều match → ambiguity_blocked_mutation
+
+[ConferenceAgent - Turn 2] resolveConferenceRef(ordinal=2, contextHint="AI conferences")
+  → handler: cosine similarity → resolved → trả về conf_002
+
+[ConferenceAgent - Turn 3] manageFollow(identifier="conf_002", identifierType="id")
+  → preToolValidator: allowed ✓ → mutation thành công
+```
+
+**Lưu ý:** Sub-agent loop không cần sửa — ConferenceAgent là one-shot agent nhưng chạy multi-turn loop (tối đa 3 turns là đủ).
+
+### Step 11: Cập nhật system prompt (phân biệt HostAgent vs ConferenceAgent) + error message
+
+#### a) System prompt — HostAgent (routing instruction)
+
+File: `src/chatbot/language/instructions/english.ts`, `vietnamese.ts`.
+
+HostAgent KHÔNG cần biết về `resolveConferenceRef`. HostAgent chỉ cần instruction để convert positional reference và route task:
+
+```
+Khi người dùng dùng tham chiếu vị trí (e.g., "thứ 2", "cái cuối", "cái đầu tiên")
+để chỉ một hội nghị trong danh sách kết quả tìm kiếm trước đó, hãy gửi toàn bộ yêu cầu cho ConferenceAgent. ConferenceAgent sẽ thực hiện mutation với ordinal và xử lý nếu bị mơ hồ.
+```
+
+**HostAgent KHÔNG gọi mutation tool với ordinal.** Nó chỉ route task cho ConferenceAgent.
+
+#### b) System prompt — ConferenceAgent (chi tiết)
+
+File: `src/chatbot/language/instructions/english.ts`, `vietnamese.ts` (section riêng cho ConferenceAgent)
+
+```
+Khi người dùng dùng tham chiếu vị trí (e.g., "thứ 2", "cái cuối", "cái đầu tiên")
+để chỉ một hội nghị trong danh sách kết quả tìm kiếm trước đó:
+1. Chuyển đổi tham chiếu thành số (2, -1, 1).
+2. Gọi mutation tool với identifierType="ordinal" và identifier là số.
+3. Nếu bị chặn với lỗi "ambiguity_blocked_mutation", hãy dùng hàm
+   resolveConferenceRef với ordinal (số), contextHint, và action.
+4. Sau khi nhận được conferenceId từ resolveConferenceRef, gọi lại mutation tool
+   với identifier=conferenceId và identifierType="id".
+```
+
+#### c) Error message `ambiguity_blocked_mutation` — hướng dẫn fallback cho ConferenceAgent
+
+Không đưa edge case vào HostAgent prompt. Error message trả về từ preToolValidator chứa hướng dẫn dùng `resolveConferenceRef` — chỉ ConferenceAgent đọc được vì nó có tool này:
 
 ```
 "Multiple result lists match this ordinal reference. "
@@ -778,7 +894,7 @@ Không đưa edge case hiếm vào system prompt. Thay vào đó, trong error me
 + "The system will try to match automatically even without contextHint."
 ```
 
-Lợi ích: chỉ tốn token khi edge case actually xảy ra, tự động hỗ trợ mọi ngôn ngữ, maintenance-free.
+Lợi ích: chỉ tốn token khi edge case actually xảy ra. HostAgent không có tool `resolveConferenceRef` nên sẽ ignore instruction này và route task cho ConferenceAgent theo system prompt của nó.
 
 ---
 
