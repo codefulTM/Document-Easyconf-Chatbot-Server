@@ -340,28 +340,32 @@ for (const fc of allCalls) {
 
 **File:** `src/services/resultSetState/resolver.service.ts`
 
-Sửa method `resolveAll` đã có để thêm optional parameters:
+Sửa method `resolveAll` đã có để merge với `resolveByContext`:
 
 ```typescript
 /**
  * Resolve conference reference thành conference ID.
  * @param conversationId conversation ID
  * @param itemOrdinal item ordinal (required)
- * @param listOrdinal list ordinal (optional, undefined = latest result set)
+ * @param listRef list reference (optional) - có thể là number (ordinal) hoặc string (context description)
+ *   - undefined/null: dùng latest result set
+ *   - number: list ordinal (1-based, -1 = last)
+ *   - string: context description để semantic match với queryText
  * @returns ResolveResult với resolvedId hoặc null nếu không match/ambiguity
  */
 async resolveAll(
   conversationId: string,
   itemOrdinal: number,
-  listOrdinal?: number,
+  listRef?: number | string,
 ): Promise<ResolveResult>;
 ```
 
 Logic:
 
-- Nếu `listOrdinal` undefined → dùng `getAllValid()` để lấy tất cả states → match itemOrdinal trên tất cả
-- Nếu `listOrdinal` provided → resolve list ordinal trước để chọn đúng state → match itemOrdinal trên state đó
-- Return `{ resolvedId: string | null, state?: ResultSetState }`
+- Nếu `listRef` undefined/null → dùng latest result set (mới nhất theo thời gian)
+- Nếu `listRef` là number → resolve list ordinal → chọn state cụ thể → match itemOrdinal
+- Nếu `listRef` là string → semantic match với queryText → chọn state có similarity cao nhất → match itemOrdinal
+- Return `{ resolvedId: string | null, reasonCode, confidence }`
 
 ### 4.6 Mở rộng preToolValidator — xử lý `conferenceRef`
 
@@ -373,7 +377,7 @@ Logic:
 // validateMutationArgs() — thêm đầu hàm
 if (isPlainObject(args.conferenceRef)) {
   const ref = args.conferenceRef as Record<string, unknown>;
-  const listOrdinal = typeof ref.list === "number" ? ref.list : undefined;
+  const listRef = ref.list; // có thể là number hoặc string
   const itemOrdinal = typeof ref.item === "number" ? ref.item : undefined;
 
   if (typeof itemOrdinal !== "number" || itemOrdinal === 0) {
@@ -386,14 +390,14 @@ if (isPlainObject(args.conferenceRef)) {
   const result = await resolver.resolveAll(
     conversationId || "",
     itemOrdinal,
-    listOrdinal,
+    listRef, // number hoặc string
   );
 
   if (!result.resolvedId) {
     // 0 match hoặc out of range
     return buildBlockedResult({
       errorCode: OrchestrationSafetyErrorCode.OUT_OF_RANGE_REFERENCE,
-      message: `Cannot resolve conferenceRef { list: ${listOrdinal}, item: ${itemOrdinal} }.`,
+      message: `Cannot resolve conferenceRef { list: ${listRef}, item: ${itemOrdinal} }.`,
     });
   }
 
@@ -407,8 +411,8 @@ if (isPlainObject(args.conferenceRef)) {
   };
 }
 
-// Sau đó: xử lý identifier + identifierType như cũ (cho acronym/title/id + backward compat ordinal string)
-// validIdentifierTypes không đổi — vẫn ["acronym", "title", "id", "ordinal"]
+// Sau đó: xử lý identifier + identifierType như cũ (cho acronym/title/id)
+// validIdentifierTypes: chỉ còn ["acronym", "title", "id"] - KHÔNG CÒN "ordinal"
 ```
 
 **Lưu ý:** `conferenceRef` ưu tiên cao hơn `identifier` + `identifierType`. Khi có `conferenceRef`, bỏ qua identifier hoàn toàn.
@@ -420,7 +424,7 @@ if (isPlainObject(args.conferenceRef)) {
 ```typescript
 if (isPlainObject(args.conferenceRef)) {
   const ref = args.conferenceRef as Record<string, unknown>;
-  const listOrdinal = typeof ref.list === "number" ? ref.list : undefined;
+  const listRef = ref.list; // có thể là number hoặc string
   const itemOrdinal = typeof ref.item === "number" ? ref.item : undefined;
 
   if (typeof itemOrdinal !== "number" || itemOrdinal === 0) {
@@ -433,14 +437,14 @@ if (isPlainObject(args.conferenceRef)) {
   const result = await this.resultSetResolver.resolveAll(
     conversationId,
     itemOrdinal,
-    listOrdinal,
+    listRef, // number hoặc string
   );
 
   if (!result.resolvedId) {
     return {
       modelResponseContent: JSON.stringify({
         error: "out_of_range_reference",
-        message: `Cannot resolve conferenceRef { list: ${listOrdinal}, item: ${itemOrdinal} }.`,
+        message: `Cannot resolve conferenceRef { list: ${listRef}, item: ${itemOrdinal} }.`,
       }),
     };
   }
@@ -461,9 +465,13 @@ conferenceRef: {
   description: "Optional. Reference to a specific conference by position in a previous result list. Use when the user refers to a conference by position (e.g., 'the 2nd one', 'thứ 2', 'the last one', 'the first conference in the last list'). The system will resolve this to the actual conference ID and retrieve its full information.",
   properties: {
     list: {
-      type: Type.NUMBER,
-      description: "Optional. List ordinal (1-based). 1 = first list, -1 = last list. If omitted, uses the latest search result list.",
+      type: Type.UNION,
+      description: "Optional. List reference - can be either a number (ordinal) or a string (context description). Number: list ordinal (1-based). 1 = first list, -1 = last list. String: description of the list (e.g., 'AI conference list', 'search results for 2026'). If omitted, uses the latest search result list.",
       nullable: true,
+      union: [
+        { type: Type.NUMBER },
+        { type: Type.STRING },
+      ],
     },
     item: {
       type: Type.NUMBER,
@@ -517,25 +525,40 @@ conferenceRef: {
 ### Step 4: Sửa `resolveAll` trong ResultSetResolver
 
 - **File:** `src/services/resultSetState/resolver.service.ts`
-- Sửa method `resolveAll` đã có: thêm optional parameter `listOrdinal`
-- Signature mới: `resolveAll(convId, itemOrdinal, listOrdinal?)`
-- Logic: nếu `listOrdinal` undefined → dùng tất cả states, nếu provided → resolve list ordinal trước rồi match itemOrdinal
+- Sửa method `resolveAll` đã có: merge với `resolveByContext`
+- Signature mới: `resolveAll(convId, itemOrdinal, listRef?)` - listRef có thể là number hoặc string
+- Logic:
+  - Nếu listRef undefined/null → dùng latest result set (mới nhất theo thời gian)
+  - Nếu listRef là number → resolve list ordinal → chọn state cụ thể → match itemOrdinal
+  - Nếu listRef là string → semantic match với queryText → chọn state có similarity cao nhất → match itemOrdinal
+- Xóa method `resolveByContext` (đã merge vào resolveAll)
 
 ### Step 5: Mở rộng preToolValidator — xử lý `conferenceRef`
 
 - **File:** `src/chatbot/guards/preToolValidator.ts`
 - Đầu `validateMutationArgs`: check `isPlainObject(args.conferenceRef)`
-- Gọi `resolver.resolveAll(convId, itemOrdinal, listOrdinal)`
+- Gọi `resolver.resolveAll(convId, itemOrdinal, listRef)` - listRef có thể là number hoặc string
 - Nếu resolve thành công → replace identifier=ID, identifierType="id"
-- Giữ backward compat cho identifier + identifierType cũ
+- **Xóa backward compat cho ordinal string trong identifier/identifierType** - chỉ giữ "acronym", "title", "id"
+- Xóa logic `tryResolveOrdinal` - ordinal string không còn được hỗ trợ
 
 ### Step 6: Thêm `conferenceRef` param vào retrieveKnowledge
 
 - **File:** `src/chatbot/handlers/retrieveKnowledge.handler.ts`
-- Kiểm tra `isPlainObject(args.conferenceRef)` → `resolveAll(convId, itemOrdinal, listOrdinal)` → filter:id → full data
+- Kiểm tra `isPlainObject(args.conferenceRef)` → `resolveAll(convId, itemOrdinal, listRef)` → filter:id → full data
 - **LUÔN save ResultSetState** mỗi khi trả về list hội nghị (giữ nguyên code hiện tại dòng 254-268)
 
-### Step 7: Cập nhật function declarations
+### Step 7: Xóa tool `resolveConferenceRef`
+
+- **File:** `src/chatbot/handlers/resolveConferenceRef.handler.ts` - Xóa file này
+- **File:** `src/chatbot/gemini/functionRegistry.ts` - Xóa `resolveConferenceRef` entry
+- **File:** `src/chatbot/language/functions/english.ts` - Xóa `englishResolveConferenceRefDeclaration`
+- **File:** `src/chatbot/language/functions/vietnamese.ts` - Xóa `vietnameseResolveConferenceRefDeclaration`
+- **File:** `src/chatbot/language/functions/spanish.ts` - Xóa `spanishResolveConferenceRefDeclaration`
+- **File:** `src/chatbot/utils/languageConfig.ts` - Xóa reference đến resolveConferenceRef declarations
+- **File:** System prompts (english.ts, vietnamese.ts, spanish.ts) - Xóa mọi reference đến `resolveConferenceRef`
+
+### Step 8: Cập nhật function declarations
 
 **File:** `english.ts`, `vietnamese.ts`, `spanish.ts`
 
@@ -561,9 +584,13 @@ conferenceRef: {
   description: "Optional. Alternative to identifier+identifierType. Use this when the user refers to a conference by position in a previous result list (e.g., 'the 2nd one', 'thứ 2', 'the last one'). When provided, identifier and identifierType are ignored.",
   properties: {
     list: {
-      type: Type.NUMBER,
-      description: "Optional. List ordinal (1-based). 1 = first list, -1 = last list. If omitted, uses the latest search result list.",
+      type: Type.UNION,
+      description: "Optional. List reference - can be either a number (ordinal) or a string (context description). Number: list ordinal (1-based). 1 = first list, -1 = last list. String: description of the list (e.g., 'AI conference list', 'search results for 2026'). If omitted, uses the latest search result list.",
       nullable: true,
+      union: [
+        { type: Type.NUMBER },
+        { type: Type.STRING },
+      ],
     },
     item: {
       type: Type.NUMBER,
@@ -578,7 +605,7 @@ conferenceRef: {
 
 Thêm hướng dẫn: "Use conferenceRef instead for ordinal references."
 
-### Step 8: System prompt — context window priority + conferenceRef
+### Step 9: System prompt — context window priority + conferenceRef
 
 **Nguyên tắc quan trọng:** Khi người dùng dùng ordinal reference ("hội nghị thứ 2", "cái thứ 3", "hội nghị cuối cùng"), LLM phải tuân theo quy tắc ưu tiên context window:
 
@@ -593,7 +620,7 @@ Thêm hướng dẫn: "Use conferenceRef instead for ordinal references."
 
 4. **HostAgent prompt:** Routing khi thấy user dùng positional reference, ưu tiên delegate sang ConferenceAgent.
 
-### Step 9: Support multiple FrontendActions
+### Step 10: Support multiple FrontendActions
 
 > **Lưu ý:** Frontend hiện tại chỉ hỗ trợ single `FrontendAction` mỗi message. Để enable multiple actions từ parallel function calls, cần update cả backend và frontend.
 
@@ -686,31 +713,33 @@ Priority order đề xuất:
 src/  # Easyconf-Chatbot-Server (Backend)
   chatbot/
     shared/
-      types.ts                                # [SỬA] FrontendAction[] (Step 9)
+      types.ts                                # [SỬA] FrontendAction[] (Step 10)
     gemini/
       pooledGemini.ts                         # [SỬA] multiple functionCalls (Step 1)
     models/
       groqCohereHybrid.ts                     # [SỬA] multiple functionCalls (Step 1)
     handlers/
-      subAgent.handler.ts                     # [SỬA] multiple function calls sequential (Step 2), collect frontendActions (Step 9)
-      hostAgent.nonStreaming.handler.ts        # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 9)
-      hostAgent.streaming.handler.ts           # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 9)
+      subAgent.handler.ts                     # [SỬA] multiple function calls sequential (Step 2), collect frontendActions (Step 10)
+      hostAgent.nonStreaming.handler.ts        # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 10)
+      hostAgent.streaming.handler.ts           # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 10)
       retrieveKnowledge.handler.ts            # [SỬA] + conferenceRef, save RS (Step 6)
-      resolveConferenceRef.handler.ts         # KHÔNG ĐỔI
+      resolveConferenceRef.handler.ts         # [XÓA] (Step 7)
     guards/
       preToolValidator.ts                     # [SỬA] xử lý conferenceRef (Step 5)
     language/
       functions/
-        english.ts                            # [SỬA] + conferenceRef (Step 7)
+        english.ts                            # [SỬA] + conferenceRef (Step 8), delete resolveConferenceRef (Step 7)
         vietnamese.ts
         spanish.ts
       instructions/
-        english.ts                            # [SỬA] context window priority (Step 8)
+        english.ts                            # [SỬA] context window priority (Step 9), delete resolveConferenceRef refs (Step 7)
         vietnamese.ts
         spanish.ts
+    utils/
+      languageConfig.ts                       # [XÓA] resolveConferenceRef declaration refs (Step 7)
   services/
     resultSetState/
-      resolver.service.ts                     # [SỬA] modify resolveAll (Step 4)
+      resolver.service.ts                     # [SỬA] modify resolveAll, delete resolveByContext (Step 4)
       store.service.ts                        # KHÔNG ĐỔI
       index.ts                                # KHÔNG ĐỔI
       __tests__/
@@ -719,8 +748,9 @@ src/  # Easyconf-Chatbot-Server (Backend)
 Easyconf-FE-Client/  # Frontend
   src/app/[locale]/chatbot/
     lib/
-      regular-chat.types.ts                   # [SỬA] FrontendAction[] (Step 9)
+      regular-chat.types.ts                   # [SỬA] FrontendAction[] (Step 10)
     stores/messageStore/
+      messageMappers.ts                       # [SỬA] handle actions[] (Step 10)
       messageMappers.ts                       # [SỬA] handle actions[] (Step 9)
     regularchat/
       MessageContentRenderer.tsx              # [SỬA] render actions[] (Step 9)
@@ -783,15 +813,18 @@ Easyconf-FE-Client/  # Frontend
 
 ## 9. DoD
 
-- [x] `conferenceRef` object (`{ list?: number, item: number }`) có trong tất cả function declarations:
+- [x] `conferenceRef` object (`{ list?: number|string, item: number }`) có trong tất cả function declarations:
   - retrieveKnowledge
   - manageFollow, manageCalendar, manageBlacklist
   - countConferenceFollowed, rateConference, getConferenceFeedback
-- [x] `ResultSetResolver.resolveAll(convId, itemOrdinal, listOrdinal?)`
-  - list undefined → dùng latest result set
-  - item: resolve số 1-based trong list đó
+- [x] `ResultSetResolver.resolveAll(convId, itemOrdinal, listRef?)`
+  - listRef undefined/null → dùng latest result set
+  - listRef number → resolve list ordinal → match item
+  - listRef string → semantic match → match item
 - [x] preToolValidator: kiểm tra `args.conferenceRef` → `resolveAll` → replace identifier=ID
 - [x] retrieveKnowledge handler: kiểm tra `args.conferenceRef` → resolve → filter:id → full RAG data; **luôn save ResultSetState** mỗi khi trả list
+- [x] Tool `resolveConferenceRef` đã xóa (handler, declaration, system prompt references)
+- [x] Method `resolveByContext` đã xóa (merge vào resolveAll)
 - [x] Gemini layer trả về `functionCalls[]` + `functionCallParts`
 - [x] Non-streaming handler loop qua tất cả function calls
 - [x] Streaming handler loop qua tất cả function calls
