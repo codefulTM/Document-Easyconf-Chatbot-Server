@@ -489,26 +489,27 @@ conferenceRef: {
   - Sửa `generateStream()` (dòng 1250): trả về `functionCalls[]`
   - Đảm bảo parse function calls hỗ trợ N calls (dòng 685-752)
 
-### Step 2: SubAgent handler — parallel function calls
+### Step 2: SubAgent handler — multiple function calls (sequential)
 
 - **File:** `src/chatbot/handlers/subAgent.handler.ts`
   - Thay vì chỉ xử lý `subAgentLlmResult.functionCall` (single), loop qua `subAgentLlmResult.functionCalls[]` (plural)
-  - Validate + execute từng call (giữ nguyên logic validate/error handling cho mỗi call)
+  - Validate + execute từng call tuần tự (sequential) bằng `for...of` loop
+  - Giữ nguyên logic validate/error handling cho mỗi call
   - Gom tất cả `FunctionResponse` parts vào 1 turn duy nhất gửi lại model
   - Model turn (history) chứa tất cả function calls trong 1 message với role `model`
   - Backward compat: nếu chỉ nhận `functionCall` (singular) → wrap thành `[functionCall]` để xử lý đồng nhất
 
-### Step 3: HostAgent handlers — parallel function calls
+### Step 3: HostAgent handlers — multiple function calls (sequential)
 
 - **File:** `src/chatbot/handlers/hostAgent.nonStreaming.handler.ts`
   - Loop `functionCallsToProcess[]` thay vì xử lý 1 call
-  - Validate + execute từng call song song (hoặc tuần tự theo nhu cầu)
+  - Validate + execute từng call tuần tự (sequential) bằng `for...of` loop
   - Gom tất cả `FunctionResponse` parts vào 1 turn gửi lại model
   - Model turn chứa tất cả function calls trong 1 message với role `model`
 
 - **File:** `src/chatbot/handlers/hostAgent.streaming.handler.ts`
   - Loop `hostAgentLLMResult.functionCalls[]` (sử dụng `parts` từ `GeminiInteractionResult` cho function call parts)
-  - Validate + execute từng call
+  - Validate + execute từng call tuần tự (sequential)
   - Gom responses vào 1 turn duy nhất
 
 - **Backward compat (cho cả 2 handler):** nếu model chỉ trả `functionCall` (singular) → wrap thành `[functionCall]` để pipeline xử lý đồng nhất
@@ -690,9 +691,9 @@ src/  # Easyconf-Chatbot-Server (Backend)
     models/
       groqCohereHybrid.ts                     # [SỬA] multiple functionCalls (Step 1)
     handlers/
-      subAgent.handler.ts                     # [SỬA] parallel function calls (Step 2), collect frontendActions (Step 9)
-      hostAgent.nonStreaming.handler.ts        # [SỬA] parallel function calls (Step 3), collect frontendActions (Step 9)
-      hostAgent.streaming.handler.ts           # [SỬA] parallel function calls (Step 3), collect frontendActions (Step 9)
+      subAgent.handler.ts                     # [SỬA] multiple function calls sequential (Step 2), collect frontendActions (Step 9)
+      hostAgent.nonStreaming.handler.ts        # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 9)
+      hostAgent.streaming.handler.ts           # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 9)
       retrieveKnowledge.handler.ts            # [SỬA] + conferenceRef, save RS (Step 6)
       resolveConferenceRef.handler.ts         # KHÔNG ĐỔI
     guards/
@@ -729,14 +730,14 @@ Easyconf-FE-Client/  # Frontend
 
 ## 7. Test Plan
 
-### Parallel function calls
+### Multiple function calls (sequential)
 
-| #   | Test case                            | Expected                 |
-| --- | ------------------------------------ | ------------------------ |
-| 1   | LLM trả về 3 function calls cùng lúc | Cả 3 đều được xử lý      |
-| 2   | 3 responses gom thành 1 turn         | function turn có 3 parts |
-| 3   | 1 call fail → các call khác vẫn chạy | Không ảnh hưởng lẫn nhau |
-| 4   | LLM trả về 0 function call           | Fallback error như cũ    |
+| #   | Test case                            | Expected                    |
+| --- | ------------------------------------ | --------------------------- |
+| 1   | LLM trả về 3 function calls cùng lúc | Cả 3 đều được xử lý tuần tự |
+| 2   | 3 responses gom thành 1 turn         | function turn có 3 parts    |
+| 3   | 1 call fail → các call khác vẫn chạy | Không ảnh hưởng lẫn nhau    |
+| 4   | LLM trả về 0 function call           | Fallback error như cũ       |
 
 ### conferenceRef resolution
 
