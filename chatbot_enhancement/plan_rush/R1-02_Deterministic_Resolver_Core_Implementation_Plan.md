@@ -4,1088 +4,660 @@
 
 **Mã work package:** R1-02
 **Ưu tiên:** Số 2
-**Scope:** In-scope (bắt buộc)
 **Kế thừa từ:** P1-01 (ResultSetState V1 — đã hoàn thành)
-**Liên quan tới:** P2-04 (3-Layer Memory), mutation tools (manageFollow, manageCalendar, v.v.), preToolValidator
 
 ### Mục tiêu
 
-Loại bỏ suy đoán của LLM cho **3 loại tham chiếu** chính:
+Loại bỏ suy đoán của LLM cho ordinal reference, đồng thời cho phép LLM lấy **full data** của nhiều conference trong 1 turn để tự suy luận temporal/ranking mà không cần resolver chuyên biệt.
 
-| Loại | Ví dụ | Resolver chịu trách nhiệm |
-|------|-------|--------------------------|
-| Ordinal | "thứ 2", "cuối", "vừa rồi", "top 3" | OrdinalResolver + NL Parser |
-| Temporal | "upcoming", "cfp đang mở", "deadline gần nhất" | TemporalResolver |
-| Ranking | "hội nghị rank A", "sắp xếp theo ngày" | RankingResolver |
+| Loại        | Giải pháp                                                               |
+| ----------- | ----------------------------------------------------------------------- |
+| Ordinal     | `conferenceRef` object `{ list?: number, item: number }` → resolve → ID |
+| Temporal    | **Không có TemporalResolver** — LLM dùng re-query pattern               |
+| Ranking     | **Không có RankingResolver** — LLM dùng re-query pattern                |
+| Thiếu field | LLM gọi nhiều `retrieveKnowledge(filter:{id})` song song                |
 
-Cả 3 resolver đều có output là **danh sách conference ID có thứ tự** — deterministic, không cần LLM suy luận.
+### Triết lý thiết kế
+
+```
+❌ Sai:  TemporalResolver.resolveUpcoming()   → enumerate không hết
+❌ Sai:  RankingResolver.sort(ids, "rank:desc") → phải implement sorting cho mọi field
+✅ Đúng: retrieveKnowledge(filter:{id: "conf1"}) lấy FULL data
+         retrieveKnowledge(filter:{id: "conf2"}) lấy FULL data
+         → LLM tự đọc data và suy luận "cái nào upcoming?", "cái nào rank cao hơn?"
+```
+
+**Chìa khóa:** Cho phép LLM gọi NHIỀU `retrieveKnowledge` trong cùng 1 turn (parallel function calls), mỗi cái với `filter: { id }` khác nhau, lấy full conferenceFields → LLM có đủ dữ liệu thật để trả lời.
 
 ---
 
-### Phân biệt với P1-01
+## 2. Vấn đề cần giải quyết
 
-P1-01 đã làm:
-- ResultSetStateStore: lưu/đọc result set trên MongoDB
-- ResultSetResolver.resolveAll: resolve ordinal (số 1-based) trên các result set đã lưu
-- ResultSetResolver.resolveByContext: resolve ordinal + semantic match contextHint
-- Fast Path trong preToolValidator: ordinal → ID (1 turn)
-- Slow Path: tool resolveConferenceRef + handler
+### 2.1 Ordinal reference ("thứ 2", "cuối", "hội nghị thứ 2 trong danh sách cuối")
 
-R1-02 mở rộng:
-- **Ordinal NL Parser**: LLM không cần tự convert "thứ 2" → 2, "cuối" → -1 nữa — parser tự làm
-- **"vừa rồi"** resolver: resolve về result set gần nhất, lấy ID cuối cùng
-- **"top N"** resolver: cắt danh sách xuống N items
-- **TemporalResolver**: hoàn toàn mới, filter conference theo thời gian thực (dùng DB)
-- **RankingResolver**: hoàn toàn mới, sort/select conference theo policy
-- **Integration hooks**: kết nối tất cả resolver vào preToolValidator và mutation tools
+**Hiện tại:** LLM tự convert "thứ 2" → "2" (dễ sai), compound phải encode string `"list:-1|item:2"`
 
----
-
-## 2. Kiến trúc tổng thể
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      LLM / Agent                                     │
-│  "theo dõi hội nghị thứ 2"   "list upcoming AI confs"               │
-└──────────┬──────────────────────────────────────────┬────────────────┘
-           │                                          │
-           ▼                                          ▼
-┌──────────────────────┐              ┌──────────────────────────────┐
-│  OrdinalResolver     │              │  TemporalResolver            │
-│                      │              │                              │
-│  parse("thứ 2") → 2  │              │  resolveUpcoming()           │
-│  parse("cuối") → -1  │              │  resolveCfpOpen()            │
-│  parse("vừa rồi")    │              │  resolveNearestDeadline()    │
-│    → lastResultSet   │              │                              │
-│  parse("top 3")      │              │  Kết quả: danh sách ID       │
-│    → limit(3)        │              │  (không cần result set state)│
-│                      │              └──────────────────────────────┘
-│  Dùng ResultSetState │
-│  để resolve số→ID    │              ┌──────────────────────────────┐
-│                      │              │  RankingResolver             │
-│  Kết quả: ID         │              │                              │
-└──────────────────────┘              │  sortByRank(policy)          │
-                                      │  sortByDate(order)           │
-                                      │  sortByTitle(order)          │
-                                      │                              │
-                                      │  Kết quả: danh sách ID       │
-                                      │  (sắp xếp lại thứ tự)        │
-                                      └──────────────────────────────┘
-```
-
-### Luồng xử lý
-
-```
-User: "theo dõi hội nghị thứ 2"
-
-[preToolValidator] nhận manageFollow(identifier="thứ 2", identifierType="ordinal_nl")
-  → OrdinalResolver.parse("thứ 2") → { type: "ordinal", value: 2 }
-  → resolveAll(convId, 2)
-    → uniqueMatch → replace identifier=ID → pass ✓
-
----
-
-User: "list upcoming AI conferences"
-
-[HostAgent] detect "upcoming" keyword
-  → route to ConferenceAgent
-[ConferenceAgent] gọi TemporalResolver.resolveUpcoming(query, filter)
-  → trả về danh sách conference ID + metadata
-  → lưu vào ResultSetState (cho ordinal reference sau này)
-  → trả compact list về LLM
-```
-
-### Resolve Strategy
-
-| Kịch bản | Resolver | Input | Output |
-|----------|----------|-------|--------|
-| "thứ 2" | OrdinalResolver.parse + resolveAll | identifier string | conference ID |
-| "cuối" | OrdinalResolver.parse + resolveAll | identifier string | conference ID |
-| "vừa rồi" | OrdinalResolver.resolveLastResult | conversationId | conference ID |
-| "top 3" | OrdinalResolver.resolveTop | conversationId + N | N conference IDs |
-| "upcoming" | TemporalResolver.resolveUpcoming | query + filter | [conference IDs] |
-| "cfp đang mở" | TemporalResolver.resolveCfpOpen | query + filter | [conference IDs] |
-| "deadline gần nhất" | TemporalResolver.resolveNearestDeadline | query + filter | [conference IDs] |
-| "rank A" | RankingResolver.sortByRank | list + policy | sorted [conference IDs] |
-| "mới nhất" | RankingResolver.sortByDate | list + order | sorted [conference IDs] |
-
----
-
-## 3. Data Model
-
-### 3.1 Thêm temporal metadata vào ResultSetState (tuỳ chọn — có thể để ở memory layer)
-
-Không cần thay đổi schema MongoDB. TemporalResolver query trực tiếp từ DB (ConferenceSyncService).
-
-### 3.2 Error codes mới
+**Giải pháp:** `conferenceRef` object với 2 field `list` và `item`, LLM output number trực tiếp:
 
 ```typescript
-// Thêm vào OrchestrationSafetyErrorCode
-TEMPORAL_NO_RESULTS: "temporal_no_results",
-RANKING_POLICY_UNKNOWN: "ranking_policy_unknown",
-ORDINAL_PARSE_FAILED: "ordinal_parse_failed",
+// LLM output — backend không cần parse gì cả
+conferenceRef: { item: 2 }                 // "thứ 2" → item thứ 2
+conferenceRef: { item: -1 }                // "cuối" → item cuối
+conferenceRef: { list: -1, item: 2 }       // "thứ 2 trong list cuối"
+conferenceRef: { list: 1, item: 1 }        // "đầu tiên trong list đầu"
 ```
 
-### 3.3 Type definitions mới
+### 2.2 Non-mutation ordinal ("cho tôi submission date của hội nghị thứ 2")
+
+**Hiện tại:** Không đi qua preToolValidator → không resolve được.
+
+**Giải pháp:** Thêm `conferenceRef` object vào `retrieveKnowledge`. Handler resolve → filter:id → re-query full data.
+
+### 2.3 List combine ("hội nghị thứ 2 trong danh sách cuối")
+
+**Giải pháp:** `conferenceRef.list` + `conferenceRef.item` — LLM output structured object, backend resolve 2 tầng (list → item).
+
+### 2.4 Thiếu field cho follow-up question
+
+**Hiện tại:** `buildCompactConferenceList` strip field → LLM không có data để trả lời chi tiết.
+
+**Giải pháp:** LLM gọi nhiều `retrieveKnowledge(filter:{id})` song song để lấy full data cho từng conference.
+
+### 2.5 Save ResultSetState mỗi lần retrieveKnowledge trả list + context window priority
+
+**Hiện tại:** Code đã save mỗi lần retrieveKnowledge trả list (dòng 254-268 trong `retrieveKnowledge.handler.ts`). Plan cũ định bỏ cơ chế này, chỉ save khi message bị đẩy ra khỏi window 50.
+
+**Giải pháp mới:** Giữ nguyên cơ chế save mỗi lần `execute` trả về list hội nghị. Đồng thời điều chỉnh prompt để LLM ưu tiên dùng dữ liệu từ context window khi resolve ordinal reference:
+
+- **Luôn save vào ResultSetState** mỗi khi `retrieveKnowledge` trả về list hội nghị (warm memory).
+- **Khi người dùng hỏi "hội nghị thứ N":**
+  - LLM kiểm tra context window: nếu thấy đủ N hội nghị → dùng thông tin trực tiếp từ context window (không cần gọi tool).
+  - Nếu context window chỉ có < N hội nghị → LLM dùng `conferenceRef: { item: N }` để lấy từ ResultSetState (warm memory).
+
+---
+
+## 3. Kiến trúc
+
+### 3.1 Luồng ordinal resolver
+
+```
+Mutation flow:
+  LLM: manageFollow(itemType="conference", action="follow",
+                     conferenceRef: { item: 2 })
+  → preToolValidator
+    → thấy args.conferenceRef.item = 2
+    → resolveConferenceRef(convId, { list: undefined, item: 2 })
+      → list undefined → dùng latest result set
+      → item 2 → resolveAll(convId, 2) → conf_002
+    → allowed=true, identifier=conf_002 ✅
+
+Compound mutation flow:
+  LLM: manageFollow(itemType="conference", action="follow",
+                     conferenceRef: { list: -1, item: 2 })
+  → preToolValidator
+    → resolveConferenceRef(convId, { list: -1, item: 2 })
+      → list -1 → getAllValid → lấy state cuối
+      → item 2 → state.orderedConferenceIds[1] → conf_002
+    → allowed=true ✅
+
+Non-mutation flow:
+  LLM: retrieveKnowledge(query="submission date",
+                          conferenceRef: { item: 2 })
+  → retrieveKnowledge handler
+    → resolveConferenceRef(convId, { list: undefined, item: 2 }) → conf_002
+    → filter.id = conf_002 → re-query full RAG data
+    → Trả full data (không strip)
+```
+
+**Lưu ý:** LLM có 2 cách để chỉ định conference:
+
+- `conferenceRef: { item: N }` — ordinal trên latest result set (không cần list)
+- `conferenceRef: { list: L, item: N }` — ordinal kết hợp list + item
+- `identifier` + `identifierType` — cách cũ (acronym/title/id), vẫn giữ cho backward compat
+
+### 3.2 Luồng parallel function calls (temporal/ranking)
+
+```
+Turn 1: LLM gọi retrieveKnowledge(query="AI conferences", listMode=true)
+        → Handler trả compact list: [conf_A, conf_B, conf_C]
+
+Turn 2 (cùng sub-agent loop):
+  LLM thấy list, muốn biết chi tiết từng cái → gọi 3 retrieveKnowledge SONG SONG:
+    fn1: retrieveKnowledge(filter={id:"conf_A"}, conferenceFields={dates, ranks, title})
+    fn2: retrieveKnowledge(filter={id:"conf_B"}, conferenceFields={dates, ranks, title})
+    fn3: retrieveKnowledge(filter={id:"conf_C"}, conferenceFields={dates, ranks, title})
+
+  → Gemini layer trả về functionCalls = [fn1, fn2, fn3]
+  → Handler xử lý CẢ 3 (tuần tự):
+      - fn1: validate → execute → response_A
+      - fn2: validate → execute → response_B
+      - fn3: validate → execute → response_C
+  → Gom 3 response thành 1 function response turn với 3 parts
+  → Gửi lại LLM
+
+Turn 3 (cùng sub-agent loop):
+  LLM đọc full data của conf_A, conf_B, conf_C
+    → "conf_A có deadline gần nhất" → trả lời người dùng 🎯
+    → Hoặc "conf_C rank A cao nhất" → trả lời
+```
+
+**Lợi ích:**
+
+- Không cần TemporalResolver — LLM đọc ngày tháng thật từ DB → biết cái nào upcoming
+- Không cần RankingResolver — LLM đọc rank thật → biết cái nào rank cao
+- LLM trả lời dựa trên dữ liệu thật → không hallucinate
+- Handle được mọi temporal mode không thể enumerate
+
+### 3.3 Luồng save ResultSetState + context window priority
+
+```
+Turn N: retrieveKnowledge trả list → LUÔN save ResultSetState (warm memory)
+                                   → List đồng thời nằm trong completeHistoryToSave (context window)
+
+Turn N+K (sau đó): Người dùng hỏi "hội nghị thứ 3 là gì?"
+  → LLM kiểm tra context window:
+    - Nếu thấy ≥ 3 hội nghị trong context → trả lời trực tiếp, KHÔNG gọi tool
+    - Nếu chỉ thấy < 3 hội nghị → gọi retrieveKnowledge(conferenceRef: { item: 3 })
+      → Backend resolve từ ResultSetState → trả full data
+```
+
+---
+
+## 4. Thay đổi cần thiết
+
+### 4.1 Gemini layer — hỗ trợ multiple function calls
+
+**File:** `src/chatbot/gemini/gemini.ts` (dòng 157-170 hiện tại)
 
 ```typescript
-// ---- OrdinalResolver ----
+// Trước: chỉ lấy functionCalls[0]
+const fc = functionCalls[0];
+return { status: "function_call", functionCall: fc };
 
-/** Kết quả parse NL ordinal */
-type OrdinalParseResult =
-  | { type: "ordinal"; value: number }           // "thứ 2" → 2, "cuối" → -1
-  | { type: "last_result" }                       // "vừa rồi"
-  | { type: "top_n"; value: number }              // "top 3" → 3
-  | { type: "unresolved" };                       // không parse được
+// Sau: trả về tất cả
+return {
+  status: "function_call",
+  functionCall: functionCalls[0], // backward compatible (legacy field)
+  functionCalls: functionCalls, // <<< MỚI: tất cả
+  functionCallParts: response.candidates?.[0]?.content?.parts, // <<< MỚI
+};
+```
 
-interface IOrdinalResolver {
-  /** Parse NL string thành ordinal reference */
-  parse(input: string): OrdinalParseResult;
+Tương tự cho `generateStream` (dòng 339-347):
 
-  /** Resolve "vừa rồi" → lấy ID cuối cùng từ result set gần nhất */
-  resolveLastResult(conversationId: string): Promise<ResolveResult>;
+```typescript
+// Trước:
+return { functionCall: functionCallsInFirstChunk[0] };
 
-  /** Resolve "top N" → lấy N ID đầu từ result set gần nhất */
-  resolveTop(
-    conversationId: string,
-    n: number,
-  ): Promise<{ resolvedIds: string[]; reasonCode: string }>;
+// Sau:
+return {
+  functionCall: functionCallsInFirstChunk[0],
+  functionCalls: functionCallsInFirstChunk,
+  functionCallParts: firstChunk.candidates?.[0]?.content?.parts,
+};
+```
+
+**Cập nhật type:**
+
+```typescript
+// Gemini.generateTurn return type mở rộng
+type GenerateTurnResult = {
+  status: "final_text" | "function_call" | "error";
+  text?: string;
+  parts?: Part[];
+  functionCall?: FunctionCall; // legacy, vẫn có
+  functionCalls?: FunctionCall[]; // <<< MỚI
+  functionCallParts?: Part[]; // <<< MỚI (streaming: đã có)
+  error?: string;
+  tokenUsage?: TokenUsageInfo;
+};
+```
+
+### 4.2 Non-streaming handler — xử lý multiple function calls
+
+**File:** `src/chatbot/handlers/hostAgent.nonStreaming.handler.ts`
+
+Sau dòng 736, thay vì xử lý `functionCall` đơn lẻ:
+
+```typescript
+// Trước (dòng 736):
+const functionCall = modelResult.functionCall;
+
+// Sau:
+const functionCallsToProcess: FunctionCall[] =
+  modelResult.functionCalls?.length > 0
+    ? modelResult.functionCalls
+    : modelResult.functionCall
+      ? [modelResult.functionCall]
+      : [];
+
+if (functionCallsToProcess.length === 0) {
+  // error handling như cũ
 }
 
-// ---- TemporalResolver ----
+// Xử lý TẤT CẢ function calls
+const functionResponses: Part[] = [];
 
-interface ITemporalResolver {
-  /** Tìm conference sắp diễn ra (conferenceDate > now) */
-  resolveUpcoming(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult>;
+for (const fc of functionCallsToProcess) {
+  // preToolValidator
+  const preToolValidation = await validatePreToolInvocation({...});
 
-  /** Tìm conference đang mở CFP (submission deadline > now) */
-  resolveCfpOpen(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult>;
+  // Execute handler
+  const handlerResult = await executeFunctionCall(fc, preToolValidation);
 
-  /** Tìm conference có deadline gửi bài gần nhất (> now) */
-  resolveNearestDeadline(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult>;
+  functionResponses.push({
+    functionResponse: {
+      name: fc.name,
+      response: handlerResult,
+    },
+  });
 }
 
-type TemporalFilter = {
-  tableName?: string;
-  startDate?: string;
-  endDate?: string;
-  [key: string]: any;
+// Gom tất cả responses vào 1 function response turn
+const combinedFunctionTurn: ChatHistoryItem = {
+  role: "function",
+  parts: functionResponses,     // <<< NHIỀU part
+  uuid: uuidv4(),
+  timestamp: new Date(),
 };
 
-type TemporalResolveResult = {
-  resolvedIds: string[];
-  totalCount: number;
-  items: Array<{
-    id: string;
-    title: string;
-    acronym: string;
-    date?: string;
-    deadline?: string;
-  }>;
-  reasonCode: "resolved" | "no_results" | "error";
+// Và model turn cũng cần chứa tất cả function calls
+const modelFunctionCallTurn: ChatHistoryItem = {
+  role: "model",
+  parts: functionCallsToProcess.map(fc => ({ functionCall: fc })),
+  uuid: uuidv4(),
+  timestamp: new Date(),
 };
-
-// ---- RankingResolver ----
-
-type RankingPolicy =
-  | { type: "rank"; order: "asc" | "desc"; field?: string }  // sort by CORE rank
-  | { type: "date"; order: "asc" | "desc" }                   // sort by conference date
-  | { type: "title"; order: "asc" | "desc" };                 // sort alphabetically
-
-type RankingResolveResult = {
-  resolvedIds: string[];
-  totalCount: number;
-  reasonCode: "resolved" | "policy_unknown" | "error";
-};
-
-interface IRankingResolver {
-  /** Sắp xếp danh sách conference theo policy */
-  sort(
-    conferenceIds: string[],
-    policy: RankingPolicy,
-  ): Promise<RankingResolveResult>;
-}
 ```
 
----
+### 4.3 Streaming handler — refinement (đã gần đúng)
 
-## 4. API / Interface
+**File:** `src/chatbot/handlers/hostAgent.streaming.handler.ts`
 
-### 4.1 OrdinalResolver
-
-```typescript
-interface IOrdinalResolver {
-  parse(raw: string): OrdinalParseResult;
-
-  resolveAll(
-    conversationId: string,
-    ordinal: number,
-  ): Promise<ResolveAllResult>;  // đã có từ P1-01
-
-  resolveByContext(
-    conversationId: string,
-    context: string | null,
-    ordinal: number,
-  ): Promise<ResolveResult>;      // đã có từ P1-01
-
-  resolveLastResult(
-    conversationId: string,
-  ): Promise<ResolveResult>;
-
-  resolveTop(
-    conversationId: string,
-    n: number,
-  ): Promise<ResolveResult & { resolvedIds?: string[] }>;
-}
-```
-
-### 4.2 TemporalResolver
+Streaming handler đã có `functionCallParts`, nhưng chỉ validate `functionCall[0]`. Cần loop qua tất cả:
 
 ```typescript
-interface ITemporalResolver {
-  resolveUpcoming(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult>;
+// Dòng 1101-1106 hiện tại: chỉ xử lý 1 call
+const preToolValidation = await validatePreToolInvocation({
+  functionName: functionCall.name, // chỉ cái đầu tiên
+  args: functionCall.args || {},
+});
 
-  resolveCfpOpen(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult>;
+// Sửa thành loop:
+const allCalls: FunctionCall[] =
+  hostAgentLLMResult.functionCalls?.length > 0
+    ? hostAgentLLMResult.functionCalls
+    : functionCall
+      ? [functionCall]
+      : [];
 
-  resolveNearestDeadline(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult>;
-}
-```
-
-TemporalResolver dùng `ConferenceSyncService` — có sẵn method:
-- `getConferenceById(id)` → ConferenceRecord chứa organizations → dates
-
-Hoặc có thể thêm method mới:
-
-```typescript
-// Thêm vào ConferenceSyncService:
-findConferencesByDateRange(fromDate: string, toDate: string): Promise<ConferenceRecord[]>;
-findConferencesByOpenCfp(): Promise<ConferenceRecord[]>;
-```
-
-### 4.3 RankingResolver
-
-```typescript
-interface IRankingResolver {
-  /**
-   * Sắp xếp danh sách conference IDs theo policy.
-   * Dùng ConferenceSyncService để lấy full record cho từng ID,
-   * sort theo policy, trả về thứ tự mới.
-   */
-  sort(
-    conferenceIds: string[],
-    policy: RankingPolicy,
-  ): Promise<RankingResolveResult>;
-}
-```
-
----
-
-## 5. Chi tiết các Resolver
-
-### 5.1 OrdinalResolver — NL Parser
-
-**File mới:** `src/services/resultSetState/ordinalParser.ts`
-
-Parser chuyển NL thành ordinal reference, loại bỏ hoàn toàn việc LLM phải suy luận:
-
-```typescript
-class OrdinalParser {
-  parse(input: string): OrdinalParseResult {
-    const trimmed = input.trim().toLowerCase();
-
-    // "vừa rồi" patterns
-    if (this.matchLastResult(trimmed)) {
-      return { type: "last_result" };
-    }
-
-    // "top N" patterns
-    const topMatch = this.matchTopN(trimmed);
-    if (topMatch) {
-      return { type: "top_n", value: topMatch };
-    }
-
-    // Ordinal number patterns: "thứ 2", "số 2", "cái thứ 3"
-    const ordinalMatch = this.matchOrdinalNumber(trimmed);
-    if (ordinalMatch !== null) {
-      return { type: "ordinal", value: ordinalMatch };
-    }
-
-    // Negative ordinal: "cuối", "áp cuối", "cuối cùng"
-    const negativeMatch = this.matchNegativeOrdinal(trimmed);
-    if (negativeMatch !== null) {
-      return { type: "ordinal", value: negativeMatch };
-    }
-
-    return { type: "unresolved" };
-  }
-}
-```
-
-**Pattern matching tables:**
-
-| Input pattern | Output |
-|---------------|--------|
-| "vừa rồi", "vừa mới", "just now", "just retrieved", "last result" | `{ type: "last_result" }` |
-| "top 3", "top 5", "3 cái đầu", "3 items đầu" | `{ type: "top_n", value: N }` |
-| "thứ 2", "thứ hai", "số 2", "cái thứ 2", "thứ 3" | `{ type: "ordinal", value: 2 }` |
-| "đầu tiên", "thứ nhất", "cái đầu", "first", "the first" | `{ type: "ordinal", value: 1 }` |
-| "cuối", "cuối cùng", "cái cuối", "last", "the last" | `{ type: "ordinal", value: -1 }` |
-| "áp cuối", "kế cuối", "second to last" | `{ type: "ordinal", value: -2 }` |
-
-**Ưu điểm:** LLM không cần convert "thứ 2" → 2 nữa. LLM chỉ cần truyền nguyên văn `identifier="thứ 2"`, `identifierType="ordinal_nl"`. Backend tự parse.
-
-**Lưu ý:** `identifierType` hiện tại là `"ordinal"` (LLM tự convert). Ta thêm `"ordinal_nl"` (backend tự parse). Giữ cả 2 để backward compatible.
-
-### 5.2 OrdinalResolver — resolveLastResult / resolveTop
-
-```typescript
-// Thêm vào ResultSetResolver (resolver.service.ts)
-
-async resolveLastResult(conversationId: string): Promise<ResolveResult> {
-  const states = await this.store.getAllValid(conversationId);
-  if (states.length === 0) {
-    return { resolvedId: null, reasonCode: "stale", confidence: "low" };
-  }
-
-  // Lấy result set gần đây nhất (getAllValid trả về mới nhất đầu)
-  const latest = states[0];
-  const lastIndex = latest.orderedConferenceIds.length - 1;
-
-  if (lastIndex < 0) {
-    return { resolvedId: null, reasonCode: "out_of_range", confidence: "low" };
-  }
-
-  return {
-    resolvedId: latest.orderedConferenceIds[lastIndex],
-    reasonCode: "resolved",
-    confidence: "high",
-  };
+const allResponses: Part[] = [];
+for (const fc of allCalls) {
+  const validation = await validatePreToolInvocation({
+    functionName: fc.name,
+    args: fc.args || {},
+    language,
+    agentId: "HostAgent",
+  });
+  // Execute + collect response vào allResponses
 }
 
-async resolveTop(
+// Gom tất cả responses
+```
+
+### 4.4 Mở rộng ResultSetResolver
+
+**File:** `src/services/resultSetState/resolver.service.ts`
+
+Method chính:
+
+```typescript
+/**
+ * Resolve conferenceRef object thành conference ID.
+ * @param listOrdinal undefined = dùng latest result set, number = list ordinal
+ * @param itemOrdinal item ordinal trong list đã chọn
+ */
+async resolveByConferenceRef(
   conversationId: string,
-  n: number,
-): Promise<{ resolvedId: string | null; resolvedIds: string[]; reasonCode: string; confidence: "high" | "low" }> {
-  const states = await this.store.getAllValid(conversationId);
-  if (states.length === 0) {
-    return { resolvedId: null, resolvedIds: [], reasonCode: "stale", confidence: "low" };
-  }
+  listOrdinal: number | undefined,
+  itemOrdinal: number,
+): Promise<ResolveResult>;
 
-  const latest = states[0];
-  const ids = latest.orderedConferenceIds.slice(0, n);
-
-  if (ids.length === 0) {
-    return { resolvedId: null, resolvedIds: [], reasonCode: "out_of_range", confidence: "low" };
-  }
-
-  return {
-    resolvedId: ids[0],
-    resolvedIds: ids,
-    reasonCode: "resolved",
-    confidence: "high",
-  };
-}
+// Các helper:
+async resolveAll(convId, ordinal);            // đã có
+async resolveByContext(convId, context, ordinal);  // đã có
+async resolveLastResult(convId);             // mới
+async resolveTop(convId, n);                  // mới
 ```
 
-### 5.3 TemporalResolver
+`resolveByConferenceRef` là entry point chính — `preToolValidator` và `retrieveKnowledge` handler đều gọi method này.
 
-**File mới:** `src/services/resultSetState/temporalResolver.service.ts`
-
-TemporalResolver query trực tiếp từ PostgreSQL (qua ConferenceSyncService hoặc PgClient) — không dùng ResultSetState vì temporal là filter động theo thời gian thực.
-
-```typescript
-class TemporalResolver implements ITemporalResolver {
-  constructor(
-    private conferenceSyncService: ConferenceSyncService,
-    private pgClient: PgClient,
-  ) {}
-
-  async resolveUpcoming(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult> {
-    // Query conferences WHERE organization.dates.type='conferenceDates'
-    // AND toDate > NOW()
-    // Sắp xếp theo fromDate ASC
-    // Giới hạn 20 kết quả
-    // Trả về danh sách ID + metadata compact
-    //
-    // SQL gợi ý:
-    // SELECT c.id, c.title, c.acronym
-    // FROM conferences c
-    // JOIN organization o ON o.conferenceId = c.id
-    // JOIN conference_date cd ON cd.organizationId = o.id
-    // WHERE cd.type = 'conferenceDates'
-    //   AND cd.toDate > NOW()
-    //   AND (c.title ILIKE '%query%' OR c.acronym ILIKE '%query%')
-    // ORDER BY cd.fromDate ASC
-    // LIMIT 20
-  }
-
-  async resolveCfpOpen(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult> {
-    // Query conferences WHERE organization.dates.type='submissionDate'
-    // AND toDate > NOW()
-    // Sắp xếp theo toDate ASC (deadline gần nhất trước)
-    // Giới hạn 20 kết quả
-  }
-
-  async resolveNearestDeadline(
-    query: string,
-    filter?: TemporalFilter,
-  ): Promise<TemporalResolveResult> {
-    // Query conferences WHERE organization.dates.type='submissionDate'
-    // AND toDate > NOW()
-    // Sắp xếp theo toDate ASC
-    // LIMIT 1 (hoặc N theo filter)
-  }
-}
-```
-
-### 5.4 RankingResolver
-
-**File mới:** `src/services/resultSetState/rankingResolver.service.ts`
-
-```typescript
-class RankingResolver implements IRankingResolver {
-  constructor(private conferenceSyncService: ConferenceSyncService) {}
-
-  async sort(
-    conferenceIds: string[],
-    policy: RankingPolicy,
-  ): Promise<RankingResolveResult> {
-    // Lấy full record cho từng ID
-    const records = await Promise.all(
-      conferenceIds.map(id => this.conferenceSyncService.getConferenceById(id)),
-    );
-    const validRecords = records.filter(Boolean) as ConferenceRecord[];
-
-    // Sort theo policy
-    switch (policy.type) {
-      case "rank":
-        // Sort theo CORE rank value (A > B > C)
-        // Dùng rank table trong conference record
-        // Cần mapping: "A" → 1, "B" → 2, "C" → 3, ...
-        break;
-      case "date":
-        // Sort theo fromDate của organization gần đây nhất
-        break;
-      case "title":
-        // Sort alphabetically
-        break;
-    }
-
-    return {
-      resolvedIds: validRecords.map(r => String(r.id)),
-      totalCount: validRecords.length,
-      reasonCode: "resolved",
-    };
-  }
-}
-```
-
----
-
-## 6. Integration Points
-
-### 6.1 Cập nhật identifierType — thêm "ordinal_nl"
-
-**File:** `src/chatbot/language/functions/english.ts`
-
-Thêm `"ordinal_nl"` vào enum của tất cả mutation tools (bên cạnh `"ordinal"` hiện tại):
-
-```typescript
-enum: ["acronym", "title", "id", "ordinal", "ordinal_nl"],
-```
-
-**Phân biệt:**
-- `"ordinal"`: LLM tự convert "thứ 2" → "2", "cuối" → "-1"
-- `"ordinal_nl"`: LLM truyền nguyên văn "thứ 2", backend tự parse
-
-### 6.2 Cập nhật preToolValidator — xử lý "ordinal_nl"
+### 4.6 Mở rộng preToolValidator — xử lý `conferenceRef`
 
 **File:** `src/chatbot/guards/preToolValidator.ts`
 
-Trong khối xử lý ordinal, thêm nhánh `ordinal_nl`:
+**Luồng mới:** Trong `validateMutationArgs`, kiểm tra `args.conferenceRef` TRƯỚC khi xử lý `identifier` + `identifierType`:
 
 ```typescript
-if (identifierType.trim() === "ordinal_nl") {
-  // Dùng OrdinalParser.parse() thay vì parseInt()
-  const parseResult = ordinalParser.parse(identifier as string);
+// validateMutationArgs() — thêm đầu hàm
+if (isPlainObject(args.conferenceRef)) {
+  const ref = args.conferenceRef as Record<string, unknown>;
+  const listOrdinal = typeof ref.list === "number" ? ref.list : undefined;
+  const itemOrdinal = typeof ref.item === "number" ? ref.item : undefined;
 
-  switch (parseResult.type) {
-    case "ordinal":
-      // resolveAll với số → Fast Path như cũ
-      break;
-    case "last_result":
-      // resolveLastResult → lấy ID từ result set gần nhất
-      break;
-    case "top_n":
-      // resolveTop → lấy N ID đầu
-      break;
-    case "unresolved":
-      // fallback về ambiguity check
-      break;
+  if (typeof itemOrdinal !== "number" || itemOrdinal === 0) {
+    return buildBlockedResult({
+      errorCode: OrchestrationSafetyErrorCode.INVALID_TOOL_ARGS,
+      message: "conferenceRef.item must be a non-zero integer.",
+    });
   }
+
+  const result = await resolver.resolveByConferenceRef(
+    conversationId || "",
+    listOrdinal,
+    itemOrdinal,
+  );
+
+  if (!result.resolvedId) {
+    // 0 match hoặc out of range
+    return buildBlockedResult({
+      errorCode: OrchestrationSafetyErrorCode.OUT_OF_RANGE_REFERENCE,
+      message: `Cannot resolve conferenceRef { list: ${listOrdinal}, item: ${itemOrdinal} }.`,
+    });
+  }
+
+  // Resolve thành công → thay identifier
+  normalizedArgs.identifier = result.resolvedId;
+  normalizedArgs.identifierType = "id";
+  return {
+    allowed: true,
+    node: PRE_TOOL_VALIDATOR_NODE,
+    normalized_args: normalizedArgs,
+  };
 }
+
+// Sau đó: xử lý identifier + identifierType như cũ (cho acronym/title/id + backward compat ordinal string)
+// validIdentifierTypes không đổi — vẫn ["acronym", "title", "id", "ordinal"]
 ```
 
-### 6.3 TemporalResolver Integration — tool mới hoặc tự động trong retrieveKnowledge
+**Lưu ý:** `conferenceRef` ưu tiên cao hơn `identifier` + `identifierType`. Khi có `conferenceRef`, bỏ qua identifier hoàn toàn.
 
-**Cách 1 (khuyên dùng):** Mở rộng `retrieveKnowledge` handler — thêm param `temporalMode` (cùng với `listMode`):
+### 4.7 Thêm `conferenceRef` param vào retrieveKnowledge
+
+**File:** `src/chatbot/handlers/retrieveKnowledge.handler.ts`
 
 ```typescript
-args: {
-  query: "AI conferences",
-  filter: { tableName: "conferences" },
-  listMode: true,
-  temporalMode: "upcoming" | "cfp_open" | "nearest_deadline" | null,
+if (isPlainObject(args.conferenceRef)) {
+  const ref = args.conferenceRef as Record<string, unknown>;
+  const listOrdinal = typeof ref.list === "number" ? ref.list : undefined;
+  const itemOrdinal = typeof ref.item === "number" ? ref.item : undefined;
+
+  if (typeof itemOrdinal !== "number" || itemOrdinal === 0) {
+    return {
+      modelResponseContent:
+        "Error: conferenceRef.item must be a non-zero integer.",
+    };
+  }
+
+  const result = await this.resultSetResolver.resolveByConferenceRef(
+    conversationId,
+    listOrdinal,
+    itemOrdinal,
+  );
+
+  if (!result.resolvedId) {
+    return {
+      modelResponseContent: JSON.stringify({
+        error: "out_of_range_reference",
+        message: `Cannot resolve conferenceRef { list: ${listOrdinal}, item: ${itemOrdinal} }.`,
+      }),
+    };
+  }
+
+  // Filter theo ID cụ thể → lấy FULL data (không compact)
+  effectiveFilter = { ...effectiveFilter, id: result.resolvedId };
 }
+
+// Bỏ qua buildCompactConferenceList khi có conferenceRef
+const skipCompact = isPlainObject(args.conferenceRef);
 ```
 
-Khi `temporalMode !== null`: handler gọi TemporalResolver thay vì retrievalService.
-
-**Cách 2:** Tool riêng `resolveTemporalConference`. Đơn giản nhưng thêm 1 tool LLM phải học.
-
-Khuyên dùng Cách 1 vì tái sử dụng flow retrieveKnowledge hiện tại.
-
-### 6.4 RankingResolver Integration
-
-RankingResolver là **post-processing step** — nó sắp xếp lại kết quả đã có.
-
-**Cách 1:** Thêm param `rankBy` vào `retrieveKnowledge`:
+**Function declaration:**
 
 ```typescript
-args: {
-  query: "AI conferences",
-  filter: { tableName: "conferences" },
-  listMode: true,
-  rankBy: "rank:desc" | "date:asc" | "title:asc" | null,
-}
-```
-
-Handler: sau khi có result list, gọi RankingResolver.sort() trước khi trả về.
-
-**Cách 2:** Integration vào mutating flow — khi LLM gọi mutation với `sortBy` param.
-
-### 6.5 Lưu ResultSetState sau Temporal/Ranking resolve
-
-Khi TemporalResolver hoặc RankingResolver trả về danh sách, cần lưu vào ResultSetState để ordinal reference sau này có thể dùng:
-
-```typescript
-// Trong retrieveKnowledge handler, sau khi temporal/ranking resolve:
-if (temporalMode || rankBy) {
-  const ids = resolvedItems.map(item => item.id);
-  await this.resultSetStateStore.save(conversationId, query, embedding, ids);
-}
+conferenceRef: {
+  type: Type.OBJECT,
+  description: "Optional. Reference to a specific conference by position in a previous result list. Use when the user refers to a conference by position (e.g., 'the 2nd one', 'thứ 2', 'the last one', 'the first conference in the last list'). The system will resolve this to the actual conference ID and retrieve its full information.",
+  properties: {
+    list: {
+      type: Type.NUMBER,
+      description: "Optional. List ordinal (1-based). 1 = first list, -1 = last list. If omitted, uses the latest search result list.",
+      nullable: true,
+    },
+    item: {
+      type: Type.NUMBER,
+      description: "Required. Item ordinal within the list (1-based). Positive = count from start (1 = first, 2 = second), negative = count from end (-1 = last, -2 = second to last). Examples: 2 for 'the 2nd one', -1 for 'the last one'.",
+    },
+  },
+  nullable: true,
+},
 ```
 
 ---
 
-## 7. System Prompt cập nhật
+## 5. Implementation Steps
 
-### 7.1 ConferenceAgent — hướng dẫn temporal/ranking/ordinal_nl
+### Step 1: Gemini layer — multiple function calls
 
-**File:** `src/chatbot/language/instructions/english.ts` (và các ngôn ngữ khác)
+- **File:** `src/chatbot/gemini/gemini.ts`
+- Sửa `generateTurn`: trả về `functionCalls[]` + `functionCallParts`
+- Sửa `generateStream`: trả về `functionCalls[]`
+- Cập nhật type `GenerateTurnResult`
 
-Thêm section mới trong ConferenceAgent instructions:
+### Step 2: Non-streaming handler — parallel function calls
 
-```
-*   **Temporal References (Upcoming, CFP, Deadlines):**
-    *   When the user asks for upcoming conferences (e.g., "upcoming AI conferences",
-        "hội nghị sắp tới"), use 'retrieveKnowledge' with \`temporalMode: "upcoming"\`.
-    *   When the user asks for conferences with open CFP (e.g., "cfp đang mở",
-        "conferences accepting papers"), use \`temporalMode: "cfp_open"\`.
-    *   When the user asks for nearest deadline (e.g., "deadline gần nhất",
-        "submission soon"), use \`temporalMode: "nearest_deadline"\`.
+- **File:** `src/chatbot/handlers/hostAgent.nonStreaming.handler.ts`
+- Loop `functionCallsToProcess[]` thay vì xử lý 1 call
+- Gom tất cả responses vào 1 turn
+- Model turn chứa tất cả function calls
 
-*   **Ranking / Sorting References:**
-    *   When the user asks to sort by rank (e.g., "rank A", "CORE rank", "sorted by rank"),
-        use \`rankBy: "rank:desc"\`.
-    *   When the user asks to sort by date (e.g., "newest first", "mới nhất"),
-        use \`rankBy: "date:desc"\`.
-    *   When the user asks to sort by title (e.g., "alphabetically", "A-Z"),
-        use \`rankBy: "title:asc"\`.
+### Step 3: Streaming handler — loop function calls
 
-*   **Ordinal References (Slow Path - NL mode):**
-    *   When the user refers to a conference by position (e.g., "the 2nd one",
-        "thứ 2", "cuối", "vừa rồi", "top 3"):
-    *   Call the mutation tool with \`identifierType="ordinal_nl"\` and
-        \`identifier\` as the **exact phrase the user used** (e.g., "thứ 2",
-        "cuối", "vừa rồi", "top 3"). Do NOT convert to a number.
-    *   The system will parse and resolve automatically.
-    *   If blocked with \`ambiguity_blocked_mutation\`, use \`resolveConferenceRef\`.
-```
+- **File:** `src/chatbot/handlers/hostAgent.streaming.handler.ts`
+- Loop `hostAgentLLMResult.functionCalls` (đã có `functionCallParts`)
+- Validate + execute từng call
+- Gom responses
 
-### 7.2 HostAgent — routing temporal/ranking
-
-HostAgent không cần học temporal cụ thể. HostAgent chỉ cần route:
-```
-- "hội nghị sắp tới" → ConferenceAgent (temporal)
-- "rank A" → ConferenceAgent (ranking)
-```
-
----
-
-## 8. Error Handling
-
-### 8.1 Error codes mới
-
-| Error code | Khi nào | HTTP analogy |
-|------------|---------|--------------|
-| `temporal_no_results` | TemporalResolver không tìm thấy kết quả | 404 |
-| `ranking_policy_unknown` | Policy không hợp lệ (e.g., "rank:invalid") | 400 |
-| `ordinal_parse_failed` | OrdinalParser không parse được input | 400 |
-
-### 8.2 Error handling trong từng resolver
-
-**OrdinalParser:**
-- Input rỗng → `{ type: "unresolved" }`
-- "top" không có số → `{ type: "unresolved" }`
-- "thứ" không có số → `{ type: "unresolved" }`
-
-**TemporalResolver:**
-- Query rỗng → vẫn query được (tất cả upcoming)
-- DB query timeout → catch error → `reasonCode: "error"`
-- Không có kết quả → `reasonCode: "no_results"`, items rỗng
-
-**RankingResolver:**
-- conferenceIds rỗng → `reasonCode: "error"`
-- Policy unknown → `reasonCode: "policy_unknown"`
-- Conference record không tìm thấy → bỏ qua ID đó, vẫn sort phần còn lại
-
----
-
-## 9. Unit Test Plan
-
-### 9.1 OrdinalParser
-
-| # | Test case | Input | Expected |
-|---|-----------|-------|----------|
-| 1 | "thứ 2" | `"thứ 2"` | `{ type: "ordinal", value: 2 }` |
-| 2 | "thứ hai" | `"thứ hai"` | `{ type: "ordinal", value: 2 }` |
-| 3 | "số 3" | `"số 3"` | `{ type: "ordinal", value: 3 }` |
-| 4 | "first" | `"first"` | `{ type: "ordinal", value: 1 }` |
-| 5 | "the first" | `"the first one"` | `{ type: "ordinal", value: 1 }` |
-| 6 | "cuối" | `"cuối"` | `{ type: "ordinal", value: -1 }` |
-| 7 | "áp cuối" | `"áp cuối"` | `{ type: "ordinal", value: -2 }` |
-| 8 | "last" | `"last"` | `{ type: "ordinal", value: -1 }` |
-| 9 | "vừa rồi" | `"vừa rồi"` | `{ type: "last_result" }` |
-| 10 | "just now" | `"just now"` | `{ type: "last_result" }` |
-| 11 | "top 3" | `"top 3"` | `{ type: "top_n", value: 3 }` |
-| 12 | "5 cái đầu" | `"5 cái đầu"` | `{ type: "top_n", value: 5 }` |
-| 13 | "3 items đầu" | `"3 items đầu"` | `{ type: "top_n", value: 3 }` |
-| 14 | Input rỗng | `""` | `{ type: "unresolved" }` |
-| 15 | Input không liên quan | `"ABC"` | `{ type: "unresolved" }` |
-| 16 | "đầu tiên" | `"đầu tiên"` | `{ type: "ordinal", value: 1 }` |
-| 17 | "cái đầu" | `"cái đầu"` | `{ type: "ordinal", value: 1 }` |
-| 18 | "second to last" | `"second to last"` | `{ type: "ordinal", value: -2 }` |
-| 19 | "thứ 1" | `"thứ 1"` | `{ type: "ordinal", value: 1 }` |
-| 20 | "top N" (không số) | `"top"` | `{ type: "unresolved" }` |
-
-### 9.2 OrdinalResolver (resolveLastResult)
-
-| # | Test case | Expected |
-|---|-----------|----------|
-| 21 | 1 result set, 3 items → lấy cuối | resolvedId = item thứ 3 |
-| 22 | 1 result set, 0 items | out_of_range |
-| 23 | 0 result set | stale |
-| 24 | 2 result set, lấy từ mới nhất | resolvedId từ latest state |
-
-### 9.3 OrdinalResolver (resolveTop)
-
-| # | Test case | Expected |
-|---|-----------|----------|
-| 25 | 1 result set, top 2 → 2 items | resolvedIds.length = 2 |
-| 26 | 1 result set, top 10 > items | resolvedIds.length = items.length |
-| 27 | 0 result set | resolvedIds = [] |
-| 28 | top 0 | resolvedIds = [] |
-
-### 9.4 TemporalResolver
-
-| # | Test case | Expected |
-|---|-----------|----------|
-| 29 | resolveUpcoming với query có kết quả | resolvedIds.length > 0 |
-| 30 | resolveUpcoming không có kết quả | reasonCode = "no_results" |
-| 31 | resolveCfpOpen với query | resolvedIds chỉ chứa conference có CFP mở |
-| 32 | resolveNearestDeadline | 1 hoặc N kết quả, sorted ASC |
-| 33 | resolveUpcoming với filter tableName khác | fallback hoặc empty |
-| 34 | TemporalResolver kết nối DB lỗi | reasonCode = "error", không crash |
-
-### 9.5 RankingResolver
-
-| # | Test case | Expected |
-|---|-----------|----------|
-| 35 | sort rank:desc | Kết quả sorted A > B > C |
-| 36 | sort rank:asc | Kết quả sorted C > B > A |
-| 37 | sort date:desc | Mới nhất trước |
-| 38 | sort title:asc | A-Z |
-| 39 | sort với conferenceIds rỗng | reasonCode = "error" |
-| 40 | sort với policy unknown | reasonCode = "policy_unknown" |
-| 41 | sort với ID không tồn tại | Bỏ qua ID đó, sort phần còn lại |
-
-### 9.6 Integration — preToolValidator ordinal_nl
-
-| # | Test case | Expected |
-|---|-----------|----------|
-| 42 | manageFollow identifier="thứ 2", identifierType="ordinal_nl" | Đúng parse → resolve → pass |
-| 43 | manageFollow identifier="vừa rồi", identifierType="ordinal_nl" | resolveLastResult → pass |
-| 44 | manageFollow identifier="top 3", identifierType="ordinal_nl" | resolveTop → pass (có thể cần mutation hỗ trợ multiple IDs) |
-| 45 | manageFollow identifier="ABC", identifierType="ordinal_nl" | parse fail → ambiguity block |
-
----
-
-## 10. Implementation Steps (Thứ tự code)
-
-### Step 1: Tạo OrdinalParser
-
-- **File:** `src/services/resultSetState/ordinalParser.ts`
-- Export class `OrdinalParser` implements `IOrdinalParser`
-- Pattern matching tables cho Vietnamese + English
-- Test với tất cả patterns trong test plan
-
-**Lưu ý:** KHÔNG dùng NLP/thư viện bên ngoài — chỉ dùng regex + string matching, siêu nhẹ.
-
-### Step 2: Thêm resolveLastResult + resolveTop vào ResultSetResolver
+### Step 4: Thêm `resolveByConferenceRef` vào ResultSetResolver
 
 - **File:** `src/services/resultSetState/resolver.service.ts`
-- Thêm 2 method mới
-- Export qua interface
+- Method chính `resolveByConferenceRef(convId, listOrdinal?, itemOrdinal)`
+- Helper: `resolveLastResult`, `resolveTop`
 
-### Step 3: Tạo TemporalResolver
-
-- **File:** `src/services/resultSetState/temporalResolver.service.ts`
-- Class `TemporalResolver` implements `ITemporalResolver`
-- Query PostgreSQL trực tiếp qua `PgClient`
-- 3 method: `resolveUpcoming`, `resolveCfpOpen`, `resolveNearestDeadline`
-- Dùng `ConferenceSyncService` để format kết quả
-
-**Chi tiết SQL cho TemporalResolver:**
-
-```sql
--- resolveUpcoming
-SELECT DISTINCT c.id, c.title, c.acronym
-FROM conferences c
-JOIN organization o ON o."conferenceId" = c.id
-JOIN conference_date cd ON cd."organizationId" = o.id
-WHERE cd.type = 'conferenceDates'
-  AND cd."toDate" > NOW()
-  AND (c.title ILIKE $1 OR c.acronym ILIKE $1)
-ORDER BY cd."fromDate" ASC
-LIMIT 20;
-
--- resolveCfpOpen
-SELECT DISTINCT c.id, c.title, c.acronym
-FROM conferences c
-JOIN organization o ON o."conferenceId" = c.id
-JOIN conference_date cd ON cd."organizationId" = o.id
-WHERE cd.type = 'submissionDate'
-  AND cd."toDate" > NOW()
-  AND (c.title ILIKE $1 OR c.acronym ILIKE $1)
-ORDER BY cd."toDate" ASC
-LIMIT 20;
-
--- resolveNearestDeadline
-SELECT c.id, c.title, c.acronym, cd."toDate" as deadline
-FROM conferences c
-JOIN organization o ON o."conferenceId" = c.id
-JOIN conference_date cd ON cd."organizationId" = o.id
-WHERE cd.type = 'submissionDate'
-  AND cd."toDate" > NOW()
-  AND (c.title ILIKE $1 OR c.acronym ILIKE $1)
-ORDER BY cd."toDate" ASC
-LIMIT 1;
-```
-
-### Step 4: Tạo RankingResolver
-
-- **File:** `src/services/resultSetState/rankingResolver.service.ts`
-- Class `RankingResolver` implements `IRankingResolver`
-- Rank mapping: `A+ → 1, A → 2, A- → 3, B+ → 4, B → 5, B- → 6, C → 7`
-- Sort theo từng policy
-- Xử lý record không tìm thấy (skip gracefully)
-
-### Step 5: Unit test
-
-- **File:** `src/services/resultSetState/__tests__/ordinalParser.test.ts`
-- **File:** `src/services/resultSetState/__tests__/temporalResolver.test.ts`
-- **File:** `src/services/resultSetState/__tests__/rankingResolver.test.ts`
-- **File:** `src/services/resultSetState/__tests__/resolver.service.test.ts` (update — thêm test cho resolveLastResult + resolveTop)
-
-### Step 6: Export module
-
-- **File:** `src/services/resultSetState/index.ts` — thêm export `OrdinalParser`, `TemporalResolver`, `RankingResolver`
-
-### Step 7: Cập nhật function declarations — thêm "ordinal_nl"
-
-- **File:** `src/chatbot/language/functions/english.ts`
-- Thêm `"ordinal_nl"` vào enum identifierType của 6 mutation tools
-- Cập nhật description:
-  ```
-  "The type of the identifier: 'acronym', 'title', 'id', 'ordinal', or 'ordinal_nl'. "
-  + "Use 'ordinal' when you have already converted a position to a number (e.g., '2' for 'the 2nd one', "
-  + "'-1' for 'the last one'). "
-  + "Use 'ordinal_nl' when you want the system to parse the user's exact natural language phrase "
-  + "(e.g., 'thứ 2', 'cuối', 'vừa rồi', 'top 3'). "
-  + "When 'ordinal_nl', the identifier must be the exact phrase the user used."
-  ```
-- **File:** `src/chatbot/language/functions/vietnamese.ts` — tương tự
-- **File:** `src/chatbot/language/functions/spanish.ts` — tương tự
-
-### Step 8: Cập nhật preToolValidator — Fast Path cho ordinal_nl
+### Step 5: Mở rộng preToolValidator — xử lý `conferenceRef`
 
 - **File:** `src/chatbot/guards/preToolValidator.ts`
-- Mở rộng `tryResolveOrdinal` hoặc tạo `tryResolveOrdinalNL`
-- Luồng xử lý:
+- Đầu `validateMutationArgs`: check `isPlainObject(args.conferenceRef)`
+- Gọi `resolver.resolveByConferenceRef()`
+- Nếu resolve thành công → replace identifier=ID, identifierType="id"
+- Giữ backward compat cho identifier + identifierType cũ
 
-```typescript
-if (identifierType.trim() === "ordinal_nl") {
-  const parseResult = ordinalParser.parse(identifier as string);
-
-  switch (parseResult.type) {
-    case "ordinal": {
-      // Dùng resolveAll như ordinal thường
-      const result = await resolver.resolveAll(convId, parseResult.value);
-      // ... xử lý uniqueMatch / 0 match / nhiều match như cũ
-    }
-    case "last_result": {
-      const result = await resolver.resolveLastResult(convId);
-      if (result.resolvedId) {
-        normalizedArgs.identifier = result.resolvedId;
-        normalizedArgs.identifierType = "id";
-        return { allowed: true, ... };
-      }
-      // fallback → out_of_range_reference
-    }
-    case "top_n": {
-      // top N — resolve nhiều ID
-      const result = await resolver.resolveTop(convId, parseResult.value);
-      if (result.resolvedIds.length > 0) {
-        // Nếu tool support multiple IDs, pass array
-        // Nếu không, lấy ID đầu tiên
-        normalizedArgs.identifier = result.resolvedIds[0];
-        normalizedArgs.identifierType = "id";
-        return { allowed: true, ... };
-      }
-    }
-    case "unresolved": {
-      // fallback → ambiguity block
-      return buildBlockedResult({
-        errorCode: OrchestrationSafetyErrorCode.ORDINAL_PARSE_FAILED,
-        message: `Could not parse ordinal reference: "${identifier}".`,
-        ...
-      });
-    }
-  }
-}
-```
-
-### Step 9: Mở rộng retrieveKnowledge handler — temporalMode + rankBy
+### Step 6: Thêm `conferenceRef` param vào retrieveKnowledge
 
 - **File:** `src/chatbot/handlers/retrieveKnowledge.handler.ts`
-- Thêm 2 param mới vào args: `temporalMode` và `rankBy`
-- Khi `temporalMode` có value:
-  - Bỏ qua retrievalService.retrieve()
-  - Gọi TemporalResolver thay thế
-  - Lưu kết quả vào ResultSetState
-- Khi `rankBy` có value:
-  - Giữ nguyên retrievalService.retrieve()
-  - Sau đó gọi RankingResolver.sort() để sắp xếp lại
-  - Lưu kết quả đã sort vào ResultSetState
+- Kiểm tra `isPlainObject(args.conferenceRef)` → `resolveByConferenceRef` → filter:id → full data
+- **LUÔN save ResultSetState** mỗi khi trả về list hội nghị (giữ nguyên code hiện tại dòng 254-268)
+
+### Step 7: Cập nhật function declarations
+
+**File:** `english.ts`, `vietnamese.ts`, `spanish.ts`
+
+#### a) Thêm `conferenceRef` vào `retrieveKnowledge`
 
 ```typescript
-// Trong execute(), trước hoặc sau retrieve:
-
-// Temporal path
-if (temporalMode) {
-  const temporalResult = await this.temporalResolver.resolve(query, {
-    mode: temporalMode,
-    filter: effectiveFilter,
-  });
-  // ... format + save + return
-}
-
-// Ranking post-processing
-if (rankBy && results.length > 0) {
-  const ids = results.map(r => r.metadata?.recordId || r.metadata?.id);
-  const ranked = await this.rankingResolver.sort(ids, parseRankBy(rankBy));
-  // Re-order results theo ranked.resolvedIds
-}
-```
-
-### Step 10: Thêm function declaration params mới
-
-- **File:** `src/chatbot/language/functions/english.ts` (retrieveKnowledge declaration)
-- Thêm 2 params:
-
-```typescript
-temporalMode: {
-  type: Type.STRING,
-  description: "Optional. Filter conferences by temporal criteria: 'upcoming' (future conferences), 'cfp_open' (conferences with open call for papers), 'nearest_deadline' (conferences with nearest submission deadline). When set, overrides normal semantic search.",
-  enum: ["upcoming", "cfp_open", "nearest_deadline"],
-  nullable: true,
-},
-
-rankBy: {
-  type: Type.STRING,
-  description: "Optional. Sort/rank criteria for the result list: 'rank:desc' (best rank first), 'rank:asc' (worst rank first), 'date:desc' (newest first), 'date:asc' (oldest first), 'title:asc' (A-Z), 'title:desc' (Z-A).",
+conferenceRef: {
+  type: Type.OBJECT,
+  description: "Optional. Reference to a specific conference by position...",
+  properties: {
+    list: { type: Type.NUMBER, nullable: true, description: "..." },
+    item: { type: Type.NUMBER, description: "..." },
+  },
   nullable: true,
 },
 ```
 
-### Step 11: Cập nhật system prompt
+#### b) Thêm `conferenceRef` vào 6 mutation tools (manageFollow, manageCalendar, manageBlacklist, countConferenceFollowed, rateConference, getConferenceFeedback)
 
-- **File:** `src/chatbot/language/instructions/english.ts`
-- **File:** `src/chatbot/language/instructions/vietnamese.ts`
-- **File:** `src/chatbot/language/instructions/spanish.ts`
+```typescript
+conferenceRef: {
+  type: Type.OBJECT,
+  description: "Optional. Alternative to identifier+identifierType. Use this when the user refers to a conference by position in a previous result list (e.g., 'the 2nd one', 'thứ 2', 'the last one'). When provided, identifier and identifierType are ignored.",
+  properties: {
+    list: {
+      type: Type.NUMBER,
+      description: "Optional. List ordinal (1-based). 1 = first list, -1 = last list. If omitted, uses the latest search result list.",
+      nullable: true,
+    },
+    item: {
+      type: Type.NUMBER,
+      description: "Required. Item ordinal within the list (1-based). Positive = from start (1 = first), negative = from end (-1 = last).",
+    },
+  },
+  nullable: true,
+},
+```
 
-Thêm section cho:
-1. ConferenceAgent: temporal mode, ranking mode, ordinal_nl (xem Section 7)
-2. HostAgent: routing temporal/ranking requests
+#### c) Cập nhật `identifier.description` và `identifierType.description`
 
-### Step 12: Register TemporalResolver + RankingResolver trong DI container
+Thêm hướng dẫn: "Use conferenceRef instead for ordinal references."
 
-- **File:** `src/chatbot/di/container.ts` (hoặc tương đương)
-- `container.registerSingleton(TemporalResolver)`
-- `container.registerSingleton(RankingResolver)`
-- `container.registerSingleton(OrdinalParser)`
+### Step 8: System prompt — context window priority + conferenceRef
+
+**Nguyên tắc quan trọng:** Khi người dùng dùng ordinal reference ("hội nghị thứ 2", "cái thứ 3", "hội nghị cuối cùng"), LLM phải tuân theo quy tắc ưu tiên context window:
+
+1. **Kiểm tra context window trước:** Đếm số lượng hội nghị hiện có trong lịch sử hội thoại gần đây (context window).
+   - Nếu số lượng hội nghị trong context window ≥ vị trí người dùng yêu cầu → **trả lời trực tiếp** bằng dữ liệu từ context window, **không cần gọi tool**.
+   - Ví dụ: Context window đang có 5 hội nghị, người dùng hỏi "hội nghị thứ 3" → LLM đọc trực tiếp từ context window và trả lời.
+
+2. **Fallback sang ResultSetState (warm memory):** Nếu context window chỉ có ít hội nghị hơn vị trí người dùng yêu cầu → dùng `conferenceRef` để lấy từ warm memory.
+   - Ví dụ: Context window chỉ có 2 hội nghị, người dùng hỏi "hội nghị thứ 5" → LLM gọi `retrieveKnowledge(conferenceRef: { item: 5 })` để backend resolve từ ResultSetState.
+
+3. **ConferenceAgent prompt:** Hướng dẫn cách dùng `conferenceRef` (list + item), re-query pattern, và quy tắc context window priority ở trên.
+
+4. **HostAgent prompt:** Routing khi thấy user dùng positional reference, ưu tiên delegate sang ConferenceAgent.
 
 ---
 
-## 11. File structure đề xuất
+## 6. File structure
 
 ```
 src/
-  services/
-    resultSetState/
-      ordinalParser.ts                      # [MỚI] NL → OrdinalParseResult
-      temporalResolver.service.ts           # [MỚI] Upcoming / CfpOpen / NearestDeadline
-      rankingResolver.service.ts            # [MỚI] Sort by rank/date/title policy
-      resolver.service.ts                   # [SỬA] + resolveLastResult, resolveTop
-      store.service.ts                      # KHÔNG ĐỔI
-      index.ts                              # [SỬA] + export mới
-      __tests__/
-        ordinalParser.test.ts               # [MỚI]
-        temporalResolver.test.ts            # [MỚI]
-        rankingResolver.test.ts             # [MỚI]
-        resolver.service.test.ts            # [SỬA] + test resolveLastResult, resolveTop
-        store.service.test.ts               # KHÔNG ĐỔI
   chatbot/
+    gemini/
+      gemini.ts                               # [SỬA] multiple functionCalls
     handlers/
-      retrieveKnowledge.handler.ts          # [SỬA] + temporalMode + rankBy
-      resolveConferenceRef.handler.ts       # KHÔNG ĐỔI
+      hostAgent.nonStreaming.handler.ts        # [SỬA] parallel function calls
+      hostAgent.streaming.handler.ts           # [SỬA] parallel function calls
+      retrieveKnowledge.handler.ts            # [SỬA] + conferenceRef, save RS
+      resolveConferenceRef.handler.ts         # KHÔNG ĐỔI
     guards/
-      preToolValidator.ts                   # [SỬA] + ordinal_nl fast path
+      preToolValidator.ts                     # [SỬA] xử lý conferenceRef
     language/
       functions/
-        english.ts                          # [SỬA] + "ordinal_nl" enum + temporalMode + rankBy
-        vietnamese.ts                       # [SỬA] + "ordinal_nl" enum
-        spanish.ts                          # [SỬA] + "ordinal_nl" enum
+        english.ts                            # [SỬA] + conferenceRef
+        vietnamese.ts
+        spanish.ts
       instructions/
-        english.ts                          # [SỬA] + system prompt temporal/ranking/ordinal_nl
-        vietnamese.ts                       # [SỬA] + system prompt temporal/ranking/ordinal_nl
-        spanish.ts                          # [SỬA] + system prompt temporal/ranking/ordinal_nl
-    di/
-      container.ts                          # [SỬA] + register mới
+        english.ts
+        vietnamese.ts
+        spanish.ts
+  services/
+    resultSetState/
+      resolver.service.ts                     # [SỬA] + resolveByConferenceRef
+      store.service.ts                        # KHÔNG ĐỔI
+      index.ts                                # KHÔNG ĐỔI
+      __tests__/
+        resolver.service.test.ts              # [SỬA]
 ```
 
 ---
 
-## 12. Definition of Done (DoD)
+## 7. Test Plan
 
-- [x] `OrdinalParser.parse()` xử lý đúng tất cả NL patterns (20+ test cases)
-- [x] `OrdinalParser.parse()` cho "vừa rồi" → `{ type: "last_result" }`
-- [x] `OrdinalParser.parse()` cho "top N" → `{ type: "top_n", value: N }`
-- [x] `ResultSetResolver.resolveLastResult()` hoạt động đúng
-- [x] `ResultSetResolver.resolveTop()` hoạt động đúng
-- [x] `TemporalResolver.resolveUpcoming()` query DB → trả danh sách ID
-- [x] `TemporalResolver.resolveCfpOpen()` query DB → trả danh sách ID
-- [x] `TemporalResolver.resolveNearestDeadline()` query DB → trả deadline gần nhất
-- [x] `RankingResolver.sort()` sort theo rank policy
-- [x] `RankingResolver.sort()` sort theo date policy
-- [x] `RankingResolver.sort()` sort theo title policy
-- [x] `"ordinal_nl"` đã thêm vào identifierType enum của tất cả mutation tools
-- [x] preToolValidator xử lý `ordinal_nl` → parse → resolve (Fast Path)
-- [x] preToolValidator xử lý "vừa rồi" → resolveLastResult
-- [x] preToolValidator xử lý "top N" → resolveTop
-- [x] `retrieveKnowledge` handler hỗ trợ `temporalMode` param
-- [x] `retrieveKnowledge` handler hỗ trợ `rankBy` param
-- [x] System prompt cập nhật cho ConferenceAgent (temporal, ranking, ordinal_nl)
-- [x] System prompt cập nhật cho HostAgent (routing)
+### Parallel function calls
+
+| #   | Test case                            | Expected                 |
+| --- | ------------------------------------ | ------------------------ |
+| 1   | LLM trả về 3 function calls cùng lúc | Cả 3 đều được xử lý      |
+| 2   | 3 responses gom thành 1 turn         | function turn có 3 parts |
+| 3   | 1 call fail → các call khác vẫn chạy | Không ảnh hưởng lẫn nhau |
+| 4   | LLM trả về 0 function call           | Fallback error như cũ    |
+
+### conferenceRef resolution
+
+| #   | Test case                                        | Expected               |
+| --- | ------------------------------------------------ | ---------------------- |
+| 5   | `{ item: 2 }` → 1 list, đủ items                 | allowed=true           |
+| 6   | `{ item: -1 }` → item cuối                       | allowed=true           |
+| 7   | `{ list: -1, item: 1 }` → list cuối, item đầu    | allowed=true           |
+| 8   | `{ list: 2, item: -1 }` → list thứ 2, item cuối  | allowed=true           |
+| 9   | `{ item: 2 }` → 2+ list match                    | ambiguity_blocked      |
+| 10  | `{ item: 99 }` → out of range                    | out_of_range_reference |
+| 11  | `{ item: 2 }` → 0 list trong conversation        | out_of_range_reference |
+| 12  | `{ item: 0 }` → invalid                          | invalid_tool_args      |
+| 13  | `{ list: 2, item: 1 }` → list index out of range | out_of_range_reference |
+
+### conferenceRef trong retrieveKnowledge
+
+| #   | Test case                                    | Expected                |
+| --- | -------------------------------------------- | ----------------------- |
+| 14  | `conferenceRef: { item: 2 }` → 1 match       | filter:id, full data    |
+| 15  | `conferenceRef: { item: 99 }` → out of range | error                   |
+| 16  | `conferenceRef: { item: 2 }` → 2+ match      | ambiguity_blocked error |
+
+---
+
+## 8. Điểm mới so với plan cũ
+
+| Mục                      | Plan cũ                   | Plan mới                                                    |
+| ------------------------ | ------------------------- | ----------------------------------------------------------- |
+| TemporalResolver         | Có — 3 method hardcode    | **Bỏ** — LLM re-query pattern                               |
+| RankingResolver          | Có — sort policy          | **Bỏ** — LLM tự sort từ full data                           |
+| `"ordinal_nl"` enum      | Thêm enum mới             | **Bỏ** — `conferenceRef` object đã đủ                       |
+| Compound string          | `"list:-3\|item:2"` parse | **Bỏ** — `conferenceRef: { list, item }` object             |
+| `ordinal` (number) param | Trong retrieveKnowledge   | **Bỏ** — `conferenceRef` object thay thế                    |
+| `conferenceRef` object   | Không có                  | **Thêm** — structured param ở 7 functions                   |
+| Gemini layer             | Single functionCall       | **Sửa** — support multiple functionCalls                    |
+| Handler loop             | Xử lý 1 call/lần          | **Sửa** — loop tất cả calls trong 1 turn                    |
+| Re-query pattern         | Không có                  | **Thêm** — LLM gọi N retrieveKnowledge(filter:id) song song |
+| Save ResultSetState      | Trong retrieveKnowledge   | **Giữ** — save mỗi lần trả list                             |
+
+---
+
+## 9. DoD
+
+- [x] `conferenceRef` object (`{ list?: number, item: number }`) có trong tất cả function declarations:
+  - retrieveKnowledge
+  - manageFollow, manageCalendar, manageBlacklist
+  - countConferenceFollowed, rateConference, getConferenceFeedback
+- [x] `ResultSetResolver.resolveByConferenceRef(convId, listOrdinal?, itemOrdinal)`
+  - list undefined → dùng latest result set
+  - item: resolve số 1-based trong list đó
+- [x] preToolValidator: kiểm tra `args.conferenceRef` → `resolveByConferenceRef` → replace identifier=ID
+- [x] retrieveKnowledge handler: kiểm tra `args.conferenceRef` → resolve → filter:id → full RAG data; **luôn save ResultSetState** mỗi khi trả list
+- [x] Gemini layer trả về `functionCalls[]` + `functionCallParts`
+- [x] Non-streaming handler loop qua tất cả function calls
+- [x] Streaming handler loop qua tất cả function calls
+- [x] Gom N function responses thành 1 turn với N parts
+- [x] System prompt: context window priority — LLM kiểm tra context window trước khi dùng `conferenceRef`
+- [x] Không còn TemporalResolver + RankingResolver trong codebase
 - [x] Unit test pass ≥ 95%
-- [x] Error codes mới (temporal_no_results, ranking_policy_unknown, ordinal_parse_failed) đã thêm
-- [x] Temporal/Ranking result được lưu vào ResultSetState
 
 ---
 
-## 13. Phụ thuộc
+## 10. Phụ thuộc
 
-| Phụ thuộc | Ghi chú |
-|-----------|---------|
-| P1-01 (ResultSetState V1) | Đã hoàn thành — ordinal resolver + store có sẵn |
-| ConferenceSyncService | Đã có — dùng cho TemporalResolver query DB |
-| PgClient | Đã có — temporal query SQL qua pgClient |
-| EmbeddingService | Đã có — không cần thay đổi |
-| MongoDB + PostgreSQL | Đã có — không cần migration mới |
-| preToolValidator | Đã có ordinal fast path — cần mở rộng cho ordinal_nl |
-
----
-
-## 14. Rủi ro & Mitigation
-
-| Rủi ro | Xác suất | Mitigation |
-|--------|----------|------------|
-| LLM không dùng ordinal_nl dù đã hướng dẫn | Medium | Giữ backward compatible với "ordinal" — nếu LLM vẫn dùng ordinal cũ, vẫn hoạt động |
-| TemporalResolver SQL performance với nhiều conference | Low | Đánh index trên conference_date.type + toDate, limit 20 |
-| RankingResolver load nhiều conference cùng lúc (N request) | Medium | Batch load records (IN query) thay vì N single queries |
-| OrdinalParser bỏ sót pattern | Low | Dễ dàng thêm pattern mới — chỉ là thêm string vào mảng |
-
----
-
-## 15. Ghi chú implementation
-
-### 15.1 OrdinalParser implementation tips
-
-- Đặt các pattern array ở class level (const) để dễ maintain
-- Kiểm tra priority: "vừa rồi" > "top N" > "cuối" > "thứ N"
-- Tiếng Việt không dấu: "thu 2", "thu hai", "cuoi" — thêm pattern cho flexible matching
-
-### 15.2 TemporalResolver implementation tips
-
-- TemporalResolver KHÔNG dùng ResultSetState — nó query trực tiếp DB
-- Sau khi temporal resolve, handler NÊN lưu kết quả vào ResultSetState để ordinal reference sau này có thể dùng
-- Dùng `conference_date` table với `type` field để phân biệt loại date
-- Field type values: `"conferenceDates"`, `"submissionDate"`, `"cameraReadyDate"`, `"notificationDate"`
-- Cần normalize ILIKE query parameter: `%${query.toLowerCase()}%`
-
-### 15.3 RankingResolver implementation tips
-
-- Rank value mapping (dựa trên CORE/rank name):
-  ```
-  "A*" → 0, "A+" → 0, "A" → 1, "A-" → 2,
-  "B+" → 3, "B" → 4, "B-" → 5,
-  "C+" → 6, "C" → 7, "C-" → 8,
-  "national" → 9, null → 99
-  ```
-- Date sort: lấy `organization.dates` filter `type === "conferenceDates"`, sort by `fromDate`
-- Title sort: localeCompare hoặc simple string comparison
+| Phụ thuộc                 | Ghi chú                                                 |
+| ------------------------- | ------------------------------------------------------- |
+| P1-01 (ResultSetState V1) | Đã hoàn thành                                           |
+| Gemini API                | Đã support multiple functionCalls — chỉ cần sửa handler |
