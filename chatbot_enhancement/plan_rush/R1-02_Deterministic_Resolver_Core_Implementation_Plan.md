@@ -127,7 +127,7 @@ Turn 2 (cùng sub-agent loop):
     fn2: retrieveKnowledge(filter={id:"conf_B"}, conferenceFields={dates, ranks, title})
     fn3: retrieveKnowledge(filter={id:"conf_C"}, conferenceFields={dates, ranks, title})
 
-  → Gemini layer trả về functionCalls = [fn1, fn2, fn3]
+  → LLM layer trả về functionCalls = [fn1, fn2, fn3]
   → Handler xử lý CẢ 3 (tuần tự):
       - fn1: validate → execute → response_A
       - fn2: validate → execute → response_B
@@ -148,6 +148,14 @@ Turn 3 (cùng sub-agent loop):
 - LLM trả lời dựa trên dữ liệu thật → không hallucinate
 - Handle được mọi temporal mode không thể enumerate
 
+**Model support:**
+
+- Interface `ChatModelService` (được PooledGemini và GroqCohereHybrid implement) đã support `tools` parameter trong cả `generateTurn` và `generateStream`
+- Gemini API: đã hỗ trợ multiple function calls
+- Groq (llama3-groq-70b-8192-tool-use-preview): hỗ trợ multi-tool use và parallel tool calling
+- Cohere (Command R+, command-a-03-2025): hỗ trợ multi-step tool use và multiple tool calls
+- Backend chỉ cần sửa handler để loop qua tất cả `functionCalls[]` thay vì xử lý 1 call
+
 ### 3.3 Luồng save ResultSetState + context window priority
 
 ```
@@ -165,14 +173,22 @@ Turn N+K (sau đó): Người dùng hỏi "hội nghị thứ 3 là gì?"
 
 ## 4. Thay đổi cần thiết
 
-### 4.1 Gemini layer — hỗ trợ multiple function calls
+### 4.1 ChatModelService implementations — hỗ trợ multiple function calls
 
-**File:** `src/chatbot/gemini/gemini.ts` (dòng 157-170 hiện tại)
+**Files:**
+
+- `src/chatbot/gemini/pooledGemini.ts` — PooledGemini.generateTurn() (dòng 242) và generateStream() (dòng 369)
+- `src/chatbot/models/groqCohereHybrid.ts` — GroqCohereHybrid.generateTurn() (dòng 997) và generateStream() (dòng 1250)
+
+**Context:** Interface `ChatModelService` (intentHandler.dependencies.ts dòng 26-97) đã định nghĩa `tools?: Tool[]` parameter trong cả `generateTurn` và `generateStream`. Cả 2 implementation đều cần cập nhật để trả về tất cả `functionCalls[]` thay vì chỉ `functionCall[0]`.
+
+#### PooledGemini (src/chatbot/gemini/pooledGemini.ts)
+
+**generateTurn() — hiện tại chỉ trả 1 functionCall:**
 
 ```typescript
-// Trước: chỉ lấy functionCalls[0]
-const fc = functionCalls[0];
-return { status: "function_call", functionCall: fc };
+// Hiện tại (cần kiểm tra code thực tế)
+// Trả về { status: "function_call", functionCall: functionCalls[0] }
 
 // Sau: trả về tất cả
 return {
@@ -180,16 +196,17 @@ return {
   functionCall: functionCalls[0], // backward compatible (legacy field)
   functionCalls: functionCalls, // <<< MỚI: tất cả
   functionCallParts: response.candidates?.[0]?.content?.parts, // <<< MỚI
+  // ... các field khác
 };
 ```
 
-Tương tự cho `generateStream` (dòng 339-347):
+**generateStream() — tương tự:**
 
 ```typescript
-// Trước:
+// Hiện tại
 return { functionCall: functionCallsInFirstChunk[0] };
 
-// Sau:
+// Sau
 return {
   functionCall: functionCallsInFirstChunk[0],
   functionCalls: functionCallsInFirstChunk,
@@ -197,21 +214,35 @@ return {
 };
 ```
 
-**Cập nhật type:**
+#### GroqCohereHybrid (src/chatbot/models/groqCohereHybrid.ts)
+
+**generateTurn() — dòng 997:**
 
 ```typescript
-// Gemini.generateTurn return type mở rộng
-type GenerateTurnResult = {
-  status: "final_text" | "function_call" | "error";
-  text?: string;
-  parts?: Part[];
-  functionCall?: FunctionCall; // legacy, vẫn có
-  functionCalls?: FunctionCall[]; // <<< MỚI
-  functionCallParts?: Part[]; // <<< MỚI (streaming: đã có)
-  error?: string;
-  tokenUsage?: TokenUsageInfo;
+// Hiện tại: cần kiểm tra cách xử lý functionCalls từ OpenAI-compatible response
+// Sau khi parse từ OpenAI response, trả về:
+return {
+  status: "function_call",
+  functionCall: parsedFunctionCalls[0], // backward compatible
+  functionCalls: parsedFunctionCalls, // <<< MỚI: tất cả
+  // ... runtimeFallback telemetry
 };
 ```
+
+**generateStream() — dòng 1250:**
+
+```typescript
+// Hiện tại: splitTextForStreaming rồi stream
+// Cần parse function calls từ response và trả về tất cả
+return {
+  status: "function_call",
+  functionCall: parsedFunctionCalls[0],
+  functionCalls: parsedFunctionCalls, // <<< MỚI
+  // ...
+};
+```
+
+**Lưu ý:** GroqCohereHybrid parse function calls từ OpenAI-compatible format (dòng 685-752), cần đảm bảo parse được N function calls không chỉ 1.
 
 ### 4.2 Non-streaming handler — xử lý multiple function calls
 
