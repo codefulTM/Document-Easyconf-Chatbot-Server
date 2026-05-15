@@ -478,26 +478,40 @@ conferenceRef: {
 
 ## 5. Implementation Steps
 
-### Step 1: Gemini layer — multiple function calls
+### Step 1: ChatModelService implementations — multiple function calls
 
-- **File:** `src/chatbot/gemini/gemini.ts`
-- Sửa `generateTurn`: trả về `functionCalls[]` + `functionCallParts`
-- Sửa `generateStream`: trả về `functionCalls[]`
-- Cập nhật type `GenerateTurnResult`
+- **File:** `src/chatbot/gemini/pooledGemini.ts`
+  - Sửa `generateTurn()` (dòng 242): trả về `functionCalls[]` (sử dụng `parts` từ `GeminiInteractionResult`)
+  - Sửa `generateStream()` (dòng 369): trả về `functionCalls[]`
 
-### Step 2: Non-streaming handler — parallel function calls
+- **File:** `src/chatbot/models/groqCohereHybrid.ts`
+  - Sửa `generateTurn()` (dòng 997): trả về `functionCalls[]` từ OpenAI-compatible response
+  - Sửa `generateStream()` (dòng 1250): trả về `functionCalls[]`
+  - Đảm bảo parse function calls hỗ trợ N calls (dòng 685-752)
+
+### Step 2: SubAgent handler — parallel function calls
+
+- **File:** `src/chatbot/handlers/subAgent.handler.ts`
+  - Thay vì chỉ xử lý `subAgentLlmResult.functionCall` (single), loop qua `subAgentLlmResult.functionCalls[]` (plural)
+  - Validate + execute từng call (giữ nguyên logic validate/error handling cho mỗi call)
+  - Gom tất cả `FunctionResponse` parts vào 1 turn duy nhất gửi lại model
+  - Model turn (history) chứa tất cả function calls trong 1 message với role `model`
+  - Backward compat: nếu chỉ nhận `functionCall` (singular) → wrap thành `[functionCall]` để xử lý đồng nhất
+
+### Step 3: HostAgent handlers — parallel function calls
 
 - **File:** `src/chatbot/handlers/hostAgent.nonStreaming.handler.ts`
-- Loop `functionCallsToProcess[]` thay vì xử lý 1 call
-- Gom tất cả responses vào 1 turn
-- Model turn chứa tất cả function calls
-
-### Step 3: Streaming handler — loop function calls
+  - Loop `functionCallsToProcess[]` thay vì xử lý 1 call
+  - Validate + execute từng call song song (hoặc tuần tự theo nhu cầu)
+  - Gom tất cả `FunctionResponse` parts vào 1 turn gửi lại model
+  - Model turn chứa tất cả function calls trong 1 message với role `model`
 
 - **File:** `src/chatbot/handlers/hostAgent.streaming.handler.ts`
-- Loop `hostAgentLLMResult.functionCalls` (đã có `functionCallParts`)
-- Validate + execute từng call
-- Gom responses
+  - Loop `hostAgentLLMResult.functionCalls[]` (sử dụng `parts` từ `GeminiInteractionResult` cho function call parts)
+  - Validate + execute từng call
+  - Gom responses vào 1 turn duy nhất
+
+- **Backward compat (cho cả 2 handler):** nếu model chỉ trả `functionCall` (singular) → wrap thành `[functionCall]` để pipeline xử lý đồng nhất
 
 ### Step 4: Thêm `resolveByConferenceRef` vào ResultSetResolver
 
@@ -577,38 +591,138 @@ Thêm hướng dẫn: "Use conferenceRef instead for ordinal references."
 
 4. **HostAgent prompt:** Routing khi thấy user dùng positional reference, ưu tiên delegate sang ConferenceAgent.
 
+### Step 9: Support multiple FrontendActions
+
+> **Lưu ý:** Frontend hiện tại chỉ hỗ trợ single `FrontendAction` mỗi message. Để enable multiple actions từ parallel function calls, cần update cả backend và frontend.
+
+#### Backend changes
+
+- **File:** `src/chatbot/shared/types.ts`
+  - Thay đổi `ChatHistoryItem.action?: FrontendAction` → `actions?: FrontendAction[]`
+  - Thay đổi `ResultUpdate.action?: FrontendAction` → `actions?: FrontendAction[]`
+  - Thay đổi `AgentCardResponse.frontendAction?: FrontendAction` → `frontendActions?: FrontendAction[]`
+  - Thay đổi `FunctionHandlerOutput.frontendAction?: FrontendAction` → `frontendActions?: FrontendAction[]`
+  - Giữ backward compat: vẫn có field `action?: FrontendAction` (deprecated) để frontend cũ không bị lỗi
+
+- **File:** `src/chatbot/handlers/subAgent.handler.ts` (line 468-471)
+  - Collect tất cả `functionOutput.frontendAction` vào array `frontendActions[]`
+  - Thay vì chỉ gán `subAgentFrontendAction = functionOutput.frontendAction` (ghi đè), dùng `frontendActions.push(functionOutput.frontendAction)`
+  - Return `frontendActions` thay vì `frontendAction`
+
+- **File:** `src/chatbot/handlers/hostAgent.nonStreaming.handler.ts`
+  - Update logic để collect `frontendActions[]` từ tất cả function calls
+  - Gom vào single response
+
+- **File:** `src/chatbot/handlers/hostAgent.streaming.handler.ts`
+  - Update logic để collect `frontendActions[]` từ tất cả function calls
+
+#### Frontend changes
+
+- **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/lib/regular-chat.types.ts`
+  - Thay đổi `action?: FrontendAction` → `actions?: FrontendAction[]`
+  - Giữ backward compat: `action?: FrontendAction` (deprecated)
+  - Thay đổi `HistoryItem.action` → `actions`
+  - Thay đổi `MessageDisplay.action` → `actions`
+
+- **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/stores/messageStore/messageMappers.ts`
+  - Update mapper để xử lý `actions[]` thay vì `action`
+  - Nếu backend gửi `action` (deprecated) → wrap thành `[action]`
+
+- **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/regularchat/MessageContentRenderer.tsx`
+  - Update component props: `actions?: FrontendAction[]`
+  - Render tất cả actions (có thể dùng queue, priority, hoặc execute tuần tự)
+  - Conflict resolution: nếu có conflict actions (ví dụ: navigate vs openMap), cần logic để quyết định
+
+- **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/regularchat/ChatMessageDisplay.tsx`
+  - Update component props: `actions?: FrontendAction[]`
+  - Pass `actions` xuống `MessageContentRenderer`
+
+#### Frontend action execution strategy
+
+Khi có multiple actions, frontend cần quyết định cách thực thi:
+
+**Option A: Execute tuần tự (sequential)**
+
+- Execute action 1, chờ hoàn thành, rồi action 2, ...
+- Ưu điểm: dễ debug, dễ rollback
+- Nhược điểm: chậm, user phải đợi từng action
+
+**Option B: Execute song song (parallel)**
+
+- Execute tất cả actions cùng lúc
+- Ưu điểm: nhanh
+- Nhược điểm: khó debug, conflicts (navigate vs openMap)
+
+**Option C: Priority-based**
+
+- Mỗi action type có priority
+- Ví dụ: `navigate` > `openMap` > `displayList`
+- Chỉ execute action có priority cao nhất
+- Ưu điểm: đơn giản, tránh conflicts
+- Nhược điểm: bỏ qua các action khác
+
+**Khuyến nghị:** Bắt đầu với **Option C (Priority-based)** vì:
+
+- Đơn giản implement
+- Tránh conflicts
+- Phù hợp với use case hiện tại (thường chỉ cần 1 action quan trọng)
+
+Priority order đề xuất:
+
+1. `navigate` — cao nhất (thay đổi route)
+2. `confirmEmailSend` — cần user interaction
+3. `openMap` — mở map
+4. `displayList`, `displayConferenceSources` — hiển thị UI
+5. `addToCalendar`, `removeFromCalendar` — calendar operations
+6. `itemFollowStatusUpdated`, `itemBlacklistStatusUpdated`, `itemCalendarStatusUpdated` — status updates
+
 ---
 
 ## 6. File structure
 
 ```
-src/
+src/  # Easyconf-Chatbot-Server (Backend)
   chatbot/
+    shared/
+      types.ts                                # [SỬA] FrontendAction[] (Step 9)
     gemini/
-      gemini.ts                               # [SỬA] multiple functionCalls
+      pooledGemini.ts                         # [SỬA] multiple functionCalls (Step 1)
+    models/
+      groqCohereHybrid.ts                     # [SỬA] multiple functionCalls (Step 1)
     handlers/
-      hostAgent.nonStreaming.handler.ts        # [SỬA] parallel function calls
-      hostAgent.streaming.handler.ts           # [SỬA] parallel function calls
-      retrieveKnowledge.handler.ts            # [SỬA] + conferenceRef, save RS
+      subAgent.handler.ts                     # [SỬA] parallel function calls (Step 2), collect frontendActions (Step 9)
+      hostAgent.nonStreaming.handler.ts        # [SỬA] parallel function calls (Step 3), collect frontendActions (Step 9)
+      hostAgent.streaming.handler.ts           # [SỬA] parallel function calls (Step 3), collect frontendActions (Step 9)
+      retrieveKnowledge.handler.ts            # [SỬA] + conferenceRef, save RS (Step 6)
       resolveConferenceRef.handler.ts         # KHÔNG ĐỔI
     guards/
-      preToolValidator.ts                     # [SỬA] xử lý conferenceRef
+      preToolValidator.ts                     # [SỬA] xử lý conferenceRef (Step 5)
     language/
       functions/
-        english.ts                            # [SỬA] + conferenceRef
+        english.ts                            # [SỬA] + conferenceRef (Step 7)
         vietnamese.ts
         spanish.ts
       instructions/
-        english.ts
+        english.ts                            # [SỬA] context window priority (Step 8)
         vietnamese.ts
         spanish.ts
   services/
     resultSetState/
-      resolver.service.ts                     # [SỬA] + resolveByConferenceRef
+      resolver.service.ts                     # [SỬA] + resolveByConferenceRef (Step 4)
       store.service.ts                        # KHÔNG ĐỔI
       index.ts                                # KHÔNG ĐỔI
       __tests__/
         resolver.service.test.ts              # [SỬA]
+
+Easyconf-FE-Client/  # Frontend
+  src/app/[locale]/chatbot/
+    lib/
+      regular-chat.types.ts                   # [SỬA] FrontendAction[] (Step 9)
+    stores/messageStore/
+      messageMappers.ts                       # [SỬA] handle actions[] (Step 9)
+    regularchat/
+      MessageContentRenderer.tsx              # [SỬA] render actions[] (Step 9)
+      ChatMessageDisplay.tsx                  # [SỬA] pass actions[] (Step 9)
 ```
 
 ---
@@ -650,18 +764,18 @@ src/
 
 ## 8. Điểm mới so với plan cũ
 
-| Mục                      | Plan cũ                   | Plan mới                                                    |
-| ------------------------ | ------------------------- | ----------------------------------------------------------- |
-| TemporalResolver         | Có — 3 method hardcode    | **Bỏ** — LLM re-query pattern                               |
-| RankingResolver          | Có — sort policy          | **Bỏ** — LLM tự sort từ full data                           |
-| `"ordinal_nl"` enum      | Thêm enum mới             | **Bỏ** — `conferenceRef` object đã đủ                       |
-| Compound string          | `"list:-3\|item:2"` parse | **Bỏ** — `conferenceRef: { list, item }` object             |
-| `ordinal` (number) param | Trong retrieveKnowledge   | **Bỏ** — `conferenceRef` object thay thế                    |
-| `conferenceRef` object   | Không có                  | **Thêm** — structured param ở 7 functions                   |
-| Gemini layer             | Single functionCall       | **Sửa** — support multiple functionCalls                    |
-| Handler loop             | Xử lý 1 call/lần          | **Sửa** — loop tất cả calls trong 1 turn                    |
-| Re-query pattern         | Không có                  | **Thêm** — LLM gọi N retrieveKnowledge(filter:id) song song |
-| Save ResultSetState      | Trong retrieveKnowledge   | **Giữ** — save mỗi lần trả list                             |
+| Mục                      | Plan cũ                   | Plan mới                                                                 |
+| ------------------------ | ------------------------- | ------------------------------------------------------------------------ |
+| TemporalResolver         | Có — 3 method hardcode    | **Bỏ** — LLM re-query pattern                                            |
+| RankingResolver          | Có — sort policy          | **Bỏ** — LLM tự sort từ full data                                        |
+| `"ordinal_nl"` enum      | Thêm enum mới             | **Bỏ** — `conferenceRef` object đã đủ                                    |
+| Compound string          | `"list:-3\|item:2"` parse | **Bỏ** — `conferenceRef: { list, item }` object                          |
+| `ordinal` (number) param | Trong retrieveKnowledge   | **Bỏ** — `conferenceRef` object thay thế                                 |
+| `conferenceRef` object   | Không có                  | **Thêm** — structured param ở 7 functions                                |
+| ChatModelService layer   | Single functionCall       | **Sửa** — PooledGemini & GroqCohereHybrid support multiple functionCalls |
+| Handler loop             | Xử lý 1 call/lần          | **Sửa** — loop tất cả calls trong 1 turn                                 |
+| Re-query pattern         | Không có                  | **Thêm** — LLM gọi N retrieveKnowledge(filter:id) song song              |
+| Save ResultSetState      | Trong retrieveKnowledge   | **Giữ** — save mỗi lần trả list                                          |
 
 ---
 
