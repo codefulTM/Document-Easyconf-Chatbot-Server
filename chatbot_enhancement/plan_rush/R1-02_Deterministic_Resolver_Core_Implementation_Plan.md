@@ -556,7 +556,7 @@ conferenceRef: {
 - **File:** `src/chatbot/language/functions/vietnamese.ts` - Xóa `vietnameseResolveConferenceRefDeclaration`
 - **File:** `src/chatbot/language/functions/spanish.ts` - Xóa `spanishResolveConferenceRefDeclaration`
 - **File:** `src/chatbot/utils/languageConfig.ts` - Xóa reference đến resolveConferenceRef declarations
-- **File:** System prompts (english.ts, vietnamese.ts, spanish.ts) - Xóa mọi reference đến `resolveConferenceRef`
+- **File:** System prompts (english.ts, vietnamese.ts) - Xóa mọi reference đến `resolveConferenceRef`
 
 ### Step 8: Cập nhật function declarations
 
