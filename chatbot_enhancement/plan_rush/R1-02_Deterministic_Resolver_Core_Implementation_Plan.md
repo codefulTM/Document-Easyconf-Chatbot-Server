@@ -340,28 +340,28 @@ for (const fc of allCalls) {
 
 **File:** `src/services/resultSetState/resolver.service.ts`
 
-Method chính:
+Sửa method `resolveAll` đã có để thêm optional parameters:
 
 ```typescript
 /**
- * Resolve conferenceRef object thành conference ID.
- * @param listOrdinal undefined = dùng latest result set, number = list ordinal
- * @param itemOrdinal item ordinal trong list đã chọn
+ * Resolve conference reference thành conference ID.
+ * @param conversationId conversation ID
+ * @param itemOrdinal item ordinal (required)
+ * @param listOrdinal list ordinal (optional, undefined = latest result set)
+ * @returns ResolveResult với resolvedId hoặc null nếu không match/ambiguity
  */
-async resolveByConferenceRef(
+async resolveAll(
   conversationId: string,
-  listOrdinal: number | undefined,
   itemOrdinal: number,
+  listOrdinal?: number,
 ): Promise<ResolveResult>;
-
-// Các helper:
-async resolveAll(convId, ordinal);            // đã có
-async resolveByContext(convId, context, ordinal);  // đã có
-async resolveLastResult(convId);             // mới
-async resolveTop(convId, n);                  // mới
 ```
 
-`resolveByConferenceRef` là entry point chính — `preToolValidator` và `retrieveKnowledge` handler đều gọi method này.
+Logic:
+
+- Nếu `listOrdinal` undefined → dùng `getAllValid()` để lấy tất cả states → match itemOrdinal trên tất cả
+- Nếu `listOrdinal` provided → resolve list ordinal trước để chọn đúng state → match itemOrdinal trên state đó
+- Return `{ resolvedId: string | null, state?: ResultSetState }`
 
 ### 4.6 Mở rộng preToolValidator — xử lý `conferenceRef`
 
@@ -383,10 +383,10 @@ if (isPlainObject(args.conferenceRef)) {
     });
   }
 
-  const result = await resolver.resolveByConferenceRef(
+  const result = await resolver.resolveAll(
     conversationId || "",
-    listOrdinal,
     itemOrdinal,
+    listOrdinal,
   );
 
   if (!result.resolvedId) {
@@ -430,10 +430,10 @@ if (isPlainObject(args.conferenceRef)) {
     };
   }
 
-  const result = await this.resultSetResolver.resolveByConferenceRef(
+  const result = await this.resultSetResolver.resolveAll(
     conversationId,
-    listOrdinal,
     itemOrdinal,
+    listOrdinal,
   );
 
   if (!result.resolvedId) {
@@ -514,24 +514,25 @@ conferenceRef: {
 
 - **Backward compat (cho cả 2 handler):** nếu model chỉ trả `functionCall` (singular) → wrap thành `[functionCall]` để pipeline xử lý đồng nhất
 
-### Step 4: Thêm `resolveByConferenceRef` vào ResultSetResolver
+### Step 4: Sửa `resolveAll` trong ResultSetResolver
 
 - **File:** `src/services/resultSetState/resolver.service.ts`
-- Method chính `resolveByConferenceRef(convId, listOrdinal?, itemOrdinal)`
-- Helper: `resolveLastResult`, `resolveTop`
+- Sửa method `resolveAll` đã có: thêm optional parameter `listOrdinal`
+- Signature mới: `resolveAll(convId, itemOrdinal, listOrdinal?)`
+- Logic: nếu `listOrdinal` undefined → dùng tất cả states, nếu provided → resolve list ordinal trước rồi match itemOrdinal
 
 ### Step 5: Mở rộng preToolValidator — xử lý `conferenceRef`
 
 - **File:** `src/chatbot/guards/preToolValidator.ts`
 - Đầu `validateMutationArgs`: check `isPlainObject(args.conferenceRef)`
-- Gọi `resolver.resolveByConferenceRef()`
+- Gọi `resolver.resolveAll(convId, itemOrdinal, listOrdinal)`
 - Nếu resolve thành công → replace identifier=ID, identifierType="id"
 - Giữ backward compat cho identifier + identifierType cũ
 
 ### Step 6: Thêm `conferenceRef` param vào retrieveKnowledge
 
 - **File:** `src/chatbot/handlers/retrieveKnowledge.handler.ts`
-- Kiểm tra `isPlainObject(args.conferenceRef)` → `resolveByConferenceRef` → filter:id → full data
+- Kiểm tra `isPlainObject(args.conferenceRef)` → `resolveAll(convId, itemOrdinal, listOrdinal)` → filter:id → full data
 - **LUÔN save ResultSetState** mỗi khi trả về list hội nghị (giữ nguyên code hiện tại dòng 254-268)
 
 ### Step 7: Cập nhật function declarations
@@ -709,7 +710,7 @@ src/  # Easyconf-Chatbot-Server (Backend)
         spanish.ts
   services/
     resultSetState/
-      resolver.service.ts                     # [SỬA] + resolveByConferenceRef (Step 4)
+      resolver.service.ts                     # [SỬA] modify resolveAll (Step 4)
       store.service.ts                        # KHÔNG ĐỔI
       index.ts                                # KHÔNG ĐỔI
       __tests__/
@@ -786,10 +787,10 @@ Easyconf-FE-Client/  # Frontend
   - retrieveKnowledge
   - manageFollow, manageCalendar, manageBlacklist
   - countConferenceFollowed, rateConference, getConferenceFeedback
-- [x] `ResultSetResolver.resolveByConferenceRef(convId, listOrdinal?, itemOrdinal)`
+- [x] `ResultSetResolver.resolveAll(convId, itemOrdinal, listOrdinal?)`
   - list undefined → dùng latest result set
   - item: resolve số 1-based trong list đó
-- [x] preToolValidator: kiểm tra `args.conferenceRef` → `resolveByConferenceRef` → replace identifier=ID
+- [x] preToolValidator: kiểm tra `args.conferenceRef` → `resolveAll` → replace identifier=ID
 - [x] retrieveKnowledge handler: kiểm tra `args.conferenceRef` → resolve → filter:id → full RAG data; **luôn save ResultSetState** mỗi khi trả list
 - [x] Gemini layer trả về `functionCalls[]` + `functionCallParts`
 - [x] Non-streaming handler loop qua tất cả function calls
