@@ -560,7 +560,7 @@ conferenceRef: {
 
 ### Step 8: Cập nhật function declarations
 
-**File:** `english.ts`, `vietnamese.ts`, `spanish.ts`
+**File:** `english.ts`
 
 #### a) Thêm `conferenceRef` vào `retrieveKnowledge`
 
@@ -601,9 +601,10 @@ conferenceRef: {
 },
 ```
 
-#### c) Cập nhật `identifier.description` và `identifierType.description`
+#### c) Xóa mọi dấu vết về ordinal references
 
-Thêm hướng dẫn: "Use conferenceRef instead for ordinal references."
+- Xóa mọi mention của "ordinal" trong `identifier.description` và `identifierType.description`
+- Không thêm hint "Use conferenceRef instead" - chỉ xóa ordinal references hoàn toàn
 
 ### Step 9: System prompt — context window priority + conferenceRef
 
