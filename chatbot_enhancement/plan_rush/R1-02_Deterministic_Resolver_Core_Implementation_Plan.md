@@ -569,7 +569,15 @@ conferenceRef: {
   type: Type.OBJECT,
   description: "Optional. Reference to a specific conference by position...",
   properties: {
-    list: { type: Type.NUMBER, nullable: true, description: "..." },
+    list: {
+      type: Type.UNION,
+      description: "Optional. List reference - can be either a number (ordinal) or a string (context description)...",
+      nullable: true,
+      union: [
+        { type: Type.NUMBER },
+        { type: Type.STRING },
+      ],
+    },
     item: { type: Type.NUMBER, description: "..." },
   },
   nullable: true,
