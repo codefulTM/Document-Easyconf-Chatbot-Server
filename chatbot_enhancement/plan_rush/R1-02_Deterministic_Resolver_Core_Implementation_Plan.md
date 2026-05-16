@@ -618,18 +618,74 @@ conferenceRef: {
 
 **Nguyên tắc quan trọng:** Khi người dùng dùng ordinal reference ("hội nghị thứ 2", "cái thứ 3", "hội nghị cuối cùng"), LLM phải tuân theo quy tắc ưu tiên context window:
 
-1. **Kiểm tra context window trước:** Đếm số lượng hội nghị hiện có trong lịch sử hội thoại gần đây (context window).
-   - Nếu số lượng hội nghị trong context window ≥ vị trí người dùng yêu cầu → **trả lời trực tiếp** bằng dữ liệu từ context window, **không cần gọi tool**.
-   - Ví dụ: Context window đang có 5 hội nghị, người dùng hỏi "hội nghị thứ 3" → LLM đọc trực tiếp từ context window và trả lời.
+1. **Kiểm tra context window trước:** Đếm số lượng DANH SÁCH hội nghị hiện có trong lịch sử hội thoại gần đây (context window).
+   - Nếu số lượng DANH SÁCH hội nghị trong context window ≥ số thứ tự danh sách hội nghị người dùng yêu cầu → **trả lời trực tiếp** bằng dữ liệu từ context window, **không cần gọi tool**.
+   - Ví dụ: Context window đang có 5 DANH SÁCH hội nghị, người dùng hỏi "hội nghị thứ ... của danh sách thứ 3 gần đây nhất" → LLM đọc trực tiếp từ context window và trả lời.
 
-2. **Fallback sang ResultSetState (warm memory):** Nếu context window chỉ có ít hội nghị hơn vị trí người dùng yêu cầu → dùng `conferenceRef` để lấy từ warm memory.
-   - Ví dụ: Context window chỉ có 2 hội nghị, người dùng hỏi "hội nghị thứ 5" → LLM gọi `retrieveKnowledge(conferenceRef: { item: 5 })` để backend resolve từ ResultSetState.
+2. **Fallback sang ResultSetState (warm memory):** Nếu context window chỉ có ít DANH SÁCH hội nghị hơn vị trí người dùng yêu cầu → dùng `conferenceRef` để lấy từ warm memory.
+   - Ví dụ: Context window chỉ có 2 DANH SÁCH hội nghị, người dùng hỏi "hội nghị thứ ... của danh sách thứ 5 gần đây nhất" → LLM gọi `retrieveKnowledge(conferenceRef: { list: "-5", item: ... })` để backend resolve từ ResultSetState.
 
 3. **ConferenceAgent prompt:** Hướng dẫn cách dùng `conferenceRef` (list + item), re-query pattern, và quy tắc context window priority ở trên.
 
 4. **HostAgent prompt:** Routing khi thấy user dùng positional reference, ưu tiên delegate sang ConferenceAgent.
 
-### Step 10: Support multiple FrontendActions
+### Step 10: Enable multiple function calling trong prompt cho tất cả agent và subagent
+
+**Mục tiêu:** Chỉnh prompt cho tất cả agent và subagent để LUÔN LUÔN dùng multiple function calling khi có thể để tiết kiệm API call.
+
+**Nguyên tắc:**
+
+- Khi cần gọi nhiều function, LLM nên gọi tất cả cùng lúc trong 1 response thay vì gọi tuần tự
+- Ví dụ: thay vì gọi `retrieveKnowledge` rồi đợi kết quả rồi mới gọi `getConferenceDetails`, LLM nên gọi cả 2 cùng lúc
+- LLM có thể gọi nhiều function cùng lúc nếu chúng không có dependencies
+
+**Files cần chỉnh:**
+
+**Tiếng Anh:**
+
+- **File:** `src/chatbot/language/functions/english.ts`
+  - Thêm instruction: "When multiple function calls are needed, make all calls in a single response whenever possible to save API calls. Only make sequential calls if there are dependencies between functions."
+  - Thêm ví dụ về multiple function calling
+
+- **File:** `src/chatbot/language/instructions/english.ts`
+  - Chỉnh prompt cho ConferenceAgent
+  - Chỉnh prompt cho HostAgent
+  - Chỉnh prompt cho các subagent khác nếu có
+  - Thêm instruction về multiple function calling
+
+**Tiếng Việt:**
+
+- **File:** `src/chatbot/language/instructions/vietnamese.ts`
+  - Chỉnh prompt cho ConferenceAgent
+  - Chỉnh prompt cho HostAgent
+  - Chỉnh prompt cho các subagent khác nếu có
+  - Thêm instruction về multiple function calling (tiếng Việt)
+
+**Instruction mẫu (tiếng Anh):**
+
+```
+IMPORTANT: When you need to call multiple functions, make all calls in a single response whenever possible. This saves API calls and improves performance.
+
+Example:
+- BAD: Call retrieveKnowledge, wait for result, then call getConferenceDetails
+- GOOD: Call both retrieveKnowledge and getConferenceDetails in the same response
+
+Only make sequential calls if there are dependencies between functions (e.g., you need the result of function A to call function B).
+```
+
+**Instruction mẫu (tiếng Việt):**
+
+```
+QUAN TRỌNG: Khi cần gọi nhiều function, hãy gọi tất cả cùng lúc trong 1 response khi có thể. Điều này tiết kiệm API call và cải thiện performance.
+
+Ví dụ:
+- SAI: Gọi retrieveKnowledge, đợi kết quả, rồi mới gọi getConferenceDetails
+- ĐÚNG: Gọi cả retrieveKnowledge và getConferenceDetails cùng lúc trong 1 response
+
+Chỉ gọi tuần tự nếu có dependencies giữa các function (ví dụ: cần kết quả của function A để gọi function B).
+```
+
+### Step 11: Support multiple FrontendActions
 
 > **Lưu ý:** Frontend hiện tại chỉ hỗ trợ single `FrontendAction` mỗi message. Để enable multiple actions từ parallel function calls, cần update cả backend và frontend.
 
@@ -722,28 +778,35 @@ Priority order đề xuất:
 src/  # Easyconf-Chatbot-Server (Backend)
   chatbot/
     shared/
-      types.ts                                # [SỬA] FrontendAction[] (Step 10)
+      types.ts                                # [SỬA] FrontendAction[] (Step 11)
     gemini/
       pooledGemini.ts                         # [SỬA] multiple functionCalls (Step 1)
     models/
       groqCohereHybrid.ts                     # [SỬA] multiple functionCalls (Step 1)
     handlers/
-      subAgent.handler.ts                     # [SỬA] multiple function calls sequential (Step 2), collect frontendActions (Step 10)
-      hostAgent.nonStreaming.handler.ts        # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 10)
-      hostAgent.streaming.handler.ts           # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 10)
+      subAgent.handler.ts                     # [SỬA] multiple function calls sequential (Step 2), collect frontendActions (Step 11)
+      hostAgent.nonStreaming.handler.ts        # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 11)
+      hostAgent.streaming.handler.ts           # [SỬA] multiple function calls sequential (Step 3), collect frontendActions (Step 11)
       retrieveKnowledge.handler.ts            # [SỬA] + conferenceRef, save RS (Step 6)
       resolveConferenceRef.handler.ts         # [XÓA] (Step 7)
     guards/
       preToolValidator.ts                     # [SỬA] xử lý conferenceRef (Step 5)
     language/
       functions/
-        english.ts                            # [SỬA] + conferenceRef (Step 8), delete resolveConferenceRef (Step 7)
+        english.ts                            # [SỬA] + conferenceRef (Step 8), delete resolveConferenceRef (Step 7), multiple function calling instruction (Step 10)
         vietnamese.ts
         spanish.ts
       instructions/
-        english.ts                            # [SỬA] context window priority (Step 9), delete resolveConferenceRef refs (Step 7)
-        vietnamese.ts
+        english.ts                            # [SỬA] context window priority (Step 9), delete resolveConferenceRef refs (Step 7), multiple function calling instruction (Step 10)
+        vietnamese.ts                          # [SỬA] context window priority (Step 9), multiple function calling instruction (Step 10)
         spanish.ts
+        chinese.ts                             # [SỬA] multiple function calling instruction (Step 10)
+        japanese.ts                            # [SỬA] multiple function calling instruction (Step 10)
+        korean.ts                              # [SỬA] multiple function calling instruction (Step 10)
+        french.ts                              # [SỬA] multiple function calling instruction (Step 10)
+        german.ts                              # [SỬA] multiple function calling instruction (Step 10)
+        russian.ts                             # [SỬA] multiple function calling instruction (Step 10)
+        arabic.ts                              # [SỬA] multiple function calling instruction (Step 10)
     utils/
       languageConfig.ts                       # [XÓA] resolveConferenceRef declaration refs (Step 7)
   services/
