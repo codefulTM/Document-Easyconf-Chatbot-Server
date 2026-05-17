@@ -113,7 +113,7 @@ Non-mutation flow:
 
 - `conferenceRef: { item: N }` — ordinal trên latest result set (không cần list)
 - `conferenceRef: { list: L, item: N }` — ordinal kết hợp list + item
-- `identifier` + `identifierType` — cách cũ (acronym/title/id), vẫn giữ cho backward compat
+- `identifier` + `identifierType` — cách cũ (acronym/title/id)
 
 ### 3.2 Luồng parallel function calls (temporal/ranking)
 
@@ -193,7 +193,6 @@ Turn N+K (sau đó): Người dùng hỏi "hội nghị thứ 3 là gì?"
 // Sau: trả về tất cả
 return {
   status: "function_call",
-  functionCall: functionCalls[0], // backward compatible (legacy field)
   functionCalls: functionCalls, // <<< MỚI: tất cả
   functionCallParts: response.candidates?.[0]?.content?.parts, // <<< MỚI
   // ... các field khác
@@ -208,7 +207,6 @@ return { functionCall: functionCallsInFirstChunk[0] };
 
 // Sau
 return {
-  functionCall: functionCallsInFirstChunk[0],
   functionCalls: functionCallsInFirstChunk,
   functionCallParts: firstChunk.candidates?.[0]?.content?.parts,
 };
@@ -223,7 +221,6 @@ return {
 // Sau khi parse từ OpenAI response, trả về:
 return {
   status: "function_call",
-  functionCall: parsedFunctionCalls[0], // backward compatible
   functionCalls: parsedFunctionCalls, // <<< MỚI: tất cả
   // ... runtimeFallback telemetry
 };
@@ -236,7 +233,6 @@ return {
 // Cần parse function calls từ response và trả về tất cả
 return {
   status: "function_call",
-  functionCall: parsedFunctionCalls[0],
   functionCalls: parsedFunctionCalls, // <<< MỚI
   // ...
 };
@@ -500,12 +496,11 @@ conferenceRef: {
 ### Step 2: SubAgent handler — multiple function calls (sequential)
 
 - **File:** `src/chatbot/handlers/subAgent.handler.ts`
-  - Thay vì chỉ xử lý `subAgentLlmResult.functionCall` (single), loop qua `subAgentLlmResult.functionCalls[]` (plural)
+  - Loop qua `subAgentLlmResult.functionCalls[]` (plural)
   - Validate + execute từng call tuần tự (sequential) bằng `for...of` loop
-  - Giữ nguyên logic validate/error handling cho mỗi call
-  - Gom tất cả `FunctionResponse` parts vào 1 turn duy nhất gửi lại model
-  - Model turn (history) chứa tất cả function calls trong 1 message với role `model`
-  - Backward compat: nếu chỉ nhận `functionCall` (singular) → wrap thành `[functionCall]` để xử lý đồng nhất
+- Giữ nguyên logic validate/error handling cho mỗi call
+- Gom tất cả `FunctionResponse` parts vào 1 turn duy nhất gửi lại model
+- Model turn (history) chứa tất cả function calls trong 1 message với role `model`
 
 ### Step 3: HostAgent handlers — multiple function calls (sequential)
 
@@ -519,8 +514,6 @@ conferenceRef: {
   - Loop `hostAgentLLMResult.functionCalls[]` (sử dụng `parts` từ `GeminiInteractionResult` cho function call parts)
   - Validate + execute từng call tuần tự (sequential)
   - Gom responses vào 1 turn duy nhất
-
-- **Backward compat (cho cả 2 handler):** nếu model chỉ trả `functionCall` (singular) → wrap thành `[functionCall]` để pipeline xử lý đồng nhất
 
 ### Step 4: Sửa `resolveAll` trong ResultSetResolver
 
@@ -696,7 +689,6 @@ Chỉ gọi tuần tự nếu có dependencies giữa các function (ví dụ: c
   - Thay đổi `ResultUpdate.action?: FrontendAction` → `actions?: FrontendAction[]`
   - Thay đổi `AgentCardResponse.frontendAction?: FrontendAction` → `frontendActions?: FrontendAction[]`
   - Thay đổi `FunctionHandlerOutput.frontendAction?: FrontendAction` → `frontendActions?: FrontendAction[]`
-  - Giữ backward compat: vẫn có field `action?: FrontendAction` (deprecated) để frontend cũ không bị lỗi
 
 - **File:** `src/chatbot/handlers/subAgent.handler.ts` (line 468-471)
   - Collect tất cả `functionOutput.frontendAction` vào array `frontendActions[]`
@@ -714,61 +706,77 @@ Chỉ gọi tuần tự nếu có dependencies giữa các function (ví dụ: c
 
 - **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/lib/regular-chat.types.ts`
   - Thay đổi `action?: FrontendAction` → `actions?: FrontendAction[]`
-  - Giữ backward compat: `action?: FrontendAction` (deprecated)
   - Thay đổi `HistoryItem.action` → `actions`
   - Thay đổi `MessageDisplay.action` → `actions`
 
 - **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/stores/messageStore/messageMappers.ts`
   - Update mapper để xử lý `actions[]` thay vì `action`
-  - Nếu backend gửi `action` (deprecated) → wrap thành `[action]`
 
 - **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/regularchat/MessageContentRenderer.tsx`
   - Update component props: `actions?: FrontendAction[]`
-  - Render tất cả actions (có thể dùng queue, priority, hoặc execute tuần tự)
-  - Conflict resolution: nếu có conflict actions (ví dụ: navigate vs openMap), cần logic để quyết định
+  - Create new component `FrontendActionsAccordion` để render multiple actions
+  - Group actions theo category:
+    - Navigation & Interaction: `navigate`, `confirmEmailSend`, `openMap`
+    - Content Display: `displayList`, `displayConferenceSources`
+    - Status Updates: `itemFollowStatusUpdated`, `itemBlacklistStatusUpdated`, `itemCalendarStatusUpdated`
+    - Calendar Operations: `addToCalendar`, `removeFromCalendar`
+  - Mỗi section có thể collapse/expand (accordion pattern)
 
 - **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/regularchat/ChatMessageDisplay.tsx`
   - Update component props: `actions?: FrontendAction[]`
   - Pass `actions` xuống `MessageContentRenderer`
 
-#### Frontend action execution strategy
+- **File:** `Easyconf-FE-Client/src/app/[locale]/chatbot/regularchat/FrontendActionsAccordion.tsx` (NEW)
+  - Create accordion component với các sections:
+    - "Navigation & Actions" - cho navigate, confirmEmailSend, openMap
+    - "Content" - cho displayList, displayConferenceSources
+    - "Status Updates" - cho itemFollowStatusUpdated, itemBlacklistStatusUpdated, itemCalendarStatusUpdated
+    - "Calendar" - cho addToCalendar, removeFromCalendar
+  - Mặc định expand section quan trọng nhất (Navigation & Actions)
+  - Các section khác collapse mặc định để tiết kiệm space
+  - User có thể click để expand/collapse từng section
 
-Khi có multiple actions, frontend cần quyết định cách thực thi:
+#### Frontend action display strategy
 
-**Option A: Execute tuần tự (sequential)**
+Khi có multiple actions, frontend sử dụng **Accordion Pattern** để hiển thị:
 
-- Execute action 1, chờ hoàn thành, rồi action 2, ...
-- Ưu điểm: dễ debug, dễ rollback
-- Nhược điểm: chậm, user phải đợi từng action
+**Accordion Structure:**
 
-**Option B: Execute song song (parallel)**
+```
+▼ Navigation & Actions (default expanded)
+  - navigate button
+  - confirmEmailSend dialog
+  - openMap component
 
-- Execute tất cả actions cùng lúc
-- Ưu điểm: nhanh
-- Nhược điểm: khó debug, conflicts (navigate vs openMap)
+▶ Content (default collapsed)
+  - displayList component
+  - displayConferenceSources component
 
-**Option C: Priority-based**
+▶ Status Updates (default collapsed)
+  - itemFollowStatusUpdated box
+  - itemBlacklistStatusUpdated box
+  - itemCalendarStatusUpdated box
 
-- Mỗi action type có priority
-- Ví dụ: `navigate` > `openMap` > `displayList`
-- Chỉ execute action có priority cao nhất
-- Ưu điểm: đơn giản, tránh conflicts
-- Nhược điểm: bỏ qua các action khác
+▶ Calendar (default collapsed)
+  - addToCalendar component
+  - removeFromCalendar component
+```
 
-**Khuyến nghị:** Bắt đầu với **Option C (Priority-based)** vì:
+**Ưu điểm của Accordion Pattern:**
 
-- Đơn giản implement
-- Tránh conflicts
-- Phù hợp với use case hiện tại (thường chỉ cần 1 action quan trọng)
+- Tiết kiệm vertical space - chỉ hiển thị quan trọng nhất
+- User có thể expand/collapse theo nhu cầu
+- Group actions logically theo category
+- Flexible cho future action types
+- Không bỏ qua bất kỳ action nào
 
-Priority order đề xuất:
+**Implementation Details:**
 
-1. `navigate` — cao nhất (thay đổi route)
-2. `confirmEmailSend` — cần user interaction
-3. `openMap` — mở map
-4. `displayList`, `displayConferenceSources` — hiển thị UI
-5. `addToCalendar`, `removeFromCalendar` — calendar operations
-6. `itemFollowStatusUpdated`, `itemBlacklistStatusUpdated`, `itemCalendarStatusUpdated` — status updates
+- Mặc định expand section "Navigation & Actions" vì thường quan trọng nhất
+- Các section khác collapse để tránh clutter
+- Icon ▼/▶ để indicate expand/collapse state
+- Smooth animation cho expand/collapse
+- Persist state nếu user scroll (optional)
 
 ---
 
@@ -820,13 +828,13 @@ src/  # Easyconf-Chatbot-Server (Backend)
 Easyconf-FE-Client/  # Frontend
   src/app/[locale]/chatbot/
     lib/
-      regular-chat.types.ts                   # [SỬA] FrontendAction[] (Step 10)
+      regular-chat.types.ts                   # [SỬA] FrontendAction[] (Step 11)
     stores/messageStore/
-      messageMappers.ts                       # [SỬA] handle actions[] (Step 10)
-      messageMappers.ts                       # [SỬA] handle actions[] (Step 9)
+      messageMappers.ts                       # [SỬA] handle actions[] (Step 11)
     regularchat/
-      MessageContentRenderer.tsx              # [SỬA] render actions[] (Step 9)
-      ChatMessageDisplay.tsx                  # [SỬA] pass actions[] (Step 9)
+      MessageContentRenderer.tsx              # [SỬA] render actions[] (Step 11)
+      ChatMessageDisplay.tsx                  # [SỬA] pass actions[] (Step 11)
+      FrontendActionsAccordion.tsx            # [MỚI] accordion component (Step 11)
 ```
 
 ---
