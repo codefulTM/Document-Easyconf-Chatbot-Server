@@ -921,3 +921,634 @@ Easyconf-FE-Client/  # Frontend
 | ------------------------- | ------------------------------------------------------- |
 | P1-01 (ResultSetState V1) | Đã hoàn thành                                           |
 | Gemini API                | Đã support multiple functionCalls — chỉ cần sửa handler |
+
+---
+
+## 11. Refactor Plan — Result Set Saving Pattern
+
+### 11.1 Mục tiêu refactor
+
+Thay đổi pattern lưu result set từ **backend tự động lưu** sang **ConferenceAgent/HostAgent chủ động gọi hàm lưu** để:
+
+- Host agent có thể kiểm soát thứ tự và nội dung result set được lưu
+- **Lưu cả lists từ LLM output VÀ lists từ user** (user có thể paste danh sách hội nghị họ quan tâm)
+- Tránh mất thông tin khi user reference lại list họ đã gửi
+
+### 11.2 Nguyên lý hoạt động
+
+**Luồng hiện tại (backend tự động lưu):**
+
+```
+ConferenceAgent gọi retrieveKnowledge → Backend tự động save ResultSetState → Host agent không kiểm soát được thứ tự
+```
+
+**Luồng mới (ConferenceAgent/HostAgent chủ động lưu):**
+
+```
+Luồng 1: ConferenceAgent lưu LLM output lists
+→ Host agent route đến ConferenceAgent
+→ ConferenceAgent gọi 2 retrieveKnowledge trả về 2 list khác nhau (List 1: 10 kết quả, List 2: 5 kết quả)
+→ Host agent muốn tổng hợp:
+  - Trường hợp 1: Tổng hợp thành 1 list duy nhất (ví dụ: 9 kết quả)
+    → Host agent yêu cầu ConferenceAgent gọi hàm save result set với 9 ids, CÓ THỨ TỰ
+    → KHÔNG ĐƯỢC truyền lung tung
+  - Trường hợp 2: Tổng hợp thành 2 list (ví dụ: List 1 lấy 5, List 2 lấy 3)
+    → Host agent yêu cầu ConferenceAgent gọi hàm save result set 2 lần trong cùng 1 turn
+    → Lưu List 1 trước, rồi List 2 sau
+    → PHẢI ĐẢM BẢO THỨ TỰ LƯU LIST, ngay cả khi gọi song song
+
+Luồng 2: HostAgent lưu user-sent lists
+→ User gửi message: "Tôi quan tâm 3 hội nghị này: ICML, NeurIPS, AAAI — cho tôi so sánh"
+→ HostAgent detect user đang gửi list hội nghị (có tên conference)
+→ HostAgent gọi hàm save result set với source="user" để lưu list này
+→ Sau này khi user nói "cái thứ 2 trong list tôi gửi", hệ thống có thể resolve
+```
+
+### 11.3 Implementation Steps
+
+#### Step R0: Đổi tên trường trong ResultSetState type
+
+**File:** `src/types/resultSetState.types.ts`
+
+Đổi tên 2 trường để reflect đúng ý nghĩa:
+
+- `queryText` → `description` (mô tả về list, không chỉ là query)
+- `queryEmbedding` → `descriptionEmbedding` (embedding của description)
+
+```typescript
+export interface ResultSetState {
+  /** Conversation ID */
+  conversationId: string;
+
+  /** Mô tả về result set (vd: "list AI conferences 2026", "user's shortlist") — dùng để match contextHint */
+  description: string;
+
+  /** Vector embedding của description để semantic matching với contextHint */
+  descriptionEmbedding: number[];
+
+  /** Danh sách ID conference có thứ tự — nguồn sự thật duy nhất cho ordinal resolver */
+  orderedConferenceIds: string[];
+
+  /** Nguồn của result set: "model" (LLM output) hoặc "user" (user sent list) */
+  source: "model" | "user";
+
+  /** Thời điểm tạo (ISO-8601 UTC) */
+  createdAt: string;
+
+  /** Thời điểm hết hạn (ISO-8601 UTC) — sau 20 phút kể từ createdAt */
+  expiresAt: string;
+}
+```
+
+**Files cần cập nhật sau khi đổi tên:**
+
+- `src/services/resultSetState/store.service.ts` — cập nhật field names + thêm field `source`
+- `src/services/resultSetState/resolver.service.ts` — cập nhật field names
+- Bất kỳ file nào khác tham chiếu `queryText` hoặc `queryEmbedding`
+
+#### Step R0b: Refactor `orderedConferenceIds` thành `orderedIdentifiers` với type information
+
+**File:** `src/types/resultSetState.types.ts`
+
+Đổi từ `orderedConferenceIds: string[]` sang generic identifiers để support multiple identifier types (acronym, title, id) consistent với `manageFollow.handler.ts`:
+
+```typescript
+interface StoredIdentifier {
+  type: "acronym" | "title" | "id";
+  value: string;
+}
+
+export interface ResultSetState {
+  /** Conversation ID */
+  conversationId: string;
+
+  /** Mô tả về result set (vd: "list AI conferences 2026", "user's shortlist") — dùng để match contextHint */
+  description: string;
+
+  /** Vector embedding của description để semantic matching với contextHint */
+  descriptionEmbedding: number[];
+
+  /** Danh sách identifier có thứ tự — hỗ trợ nhiều loại identifier (acronym, title, id) */
+  orderedIdentifiers: StoredIdentifier[];
+
+  /** Nguồn của result set: "model" (LLM output) hoặc "user" (user sent list) */
+  source: "model" | "user";
+
+  /** Thời điểm tạo (ISO-8601 UTC) */
+  createdAt: string;
+
+  /** Thời điểm hết hạn (ISO-8601 UTC) — sau 20 phút kể từ createdAt */
+  expiresAt: string;
+}
+```
+
+**Files cần cập nhật sau khi refactor:**
+
+- `src/services/resultSetState/store.service.ts` — cập nhật logic lưu identifiers thay vì chỉ conference IDs
+- `src/services/resultSetState/resolver.service.ts` — cập nhật logic resolve theo identifier type
+- `src/chatbot/handlers/saveResultSet.handler.ts` — cập nhật interface accept identifiers thay vì chỉ IDs
+- `src/chatbot/language/functions/english.ts` — cập nhật function declaration cho identifiers
+- `src/chatbot/language/functions/vietnamese.ts` — cập nhật function declaration cho identifiers
+- Bất kỳ file nào khác tham chiếu `orderedConferenceIds`
+
+#### Step R1: Tạo hàm `saveResultSet` cho ConferenceAgent
+
+**File:** `src/chatbot/handlers/saveResultSet.handler.ts` (NEW)
+
+```typescript
+export async function saveResultSetHandler(
+  conversationId: string,
+  description: string,
+  orderedIdentifiers: StoredIdentifier[],
+  source: "model" | "user",
+  listName?: string,
+): Promise<SaveResultSetOutput> {
+  // Validate orderedIdentifiers là array và không rỗng
+  if (!Array.isArray(orderedIdentifiers) || orderedIdentifiers.length === 0) {
+    return {
+      success: false,
+      error: "orderedIdentifiers must be a non-empty array",
+    };
+  }
+
+  // Validate conversationId
+  if (!conversationId) {
+    return {
+      success: false,
+      error: "conversationId is required",
+    };
+  }
+
+  try {
+    // Lưu vào ResultSetState với thứ tự được bảo toàn
+    const resultSetStateStore = container.resolve(ResultSetStateStore);
+    await resultSetStateStore.save(
+      conversationId,
+      description,
+      orderedIdentifiers, // Thứ tự array được bảo toàn
+      source, // "model" hoặc "user"
+    );
+
+    return {
+      success: true,
+      savedCount: orderedIdentifiers.length,
+      listName: listName || null,
+      source,
+    };
+  } catch (error) {
+    const { message: errorMessage } = getErrorMessageAndStack(error);
+    return {
+      success: false,
+      error: errorMessage,
+    };
+  }
+}
+```
+
+**Interface definitions:**
+
+```typescript
+interface SaveResultSetOutput {
+  success: boolean;
+  savedCount?: number;
+  listName?: string | null;
+  source?: "model" | "user";
+  error?: string;
+}
+```
+
+#### Step R2: Thêm `saveResultSet` vào function registry
+
+**File:** `src/chatbot/gemini/functionRegistry.ts`
+
+```typescript
+import { saveResultSetHandler } from "../handlers/saveResultSet.handler";
+
+// Trong functionRegistryMap:
+"saveResultSet": {
+  handler: saveResultSetHandler,
+  allowedAgents: ["ConferenceAgent", "HostAgent"],  // Cả 2 agent đều được phép gọi (HostAgent để save user lists)
+},
+```
+
+#### Step R3: Thêm function declaration cho `saveResultSet`
+
+**File:** `src/chatbot/language/functions/english.ts`
+
+```typescript
+export const englishSaveResultSetDeclaration: FunctionDeclaration = {
+  name: "saveResultSet",
+  description:
+    "Save a set of conference IDs as a named result set for later reference by ordinal position. This allows the HostAgent to control which conferences are saved and in what order. IMPORTANT: The order of conferenceIds in the array MUST be preserved exactly as provided - this order will be used for ordinal references (1st, 2nd, etc.).",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      conferenceIds: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description:
+          "Array of conference IDs to save. The order of IDs in this array MUST be preserved - the first ID will be position 1, second ID will be position 2, etc. Do NOT shuffle or reorder this array.",
+        minItems: 1,
+      },
+      source: {
+        type: Type.STRING,
+        description:
+          "Source of this result set: 'model' if generated by LLM (default), 'user' if sent by user in their message. HostAgent should use 'user' when detecting conference lists in user messages.",
+        enum: ["model", "user"],
+        nullable: true,
+      },
+      listName: {
+        type: Type.STRING,
+        description:
+          "Optional name for this result set (e.g., 'list1', 'list2', 'primary', 'secondary'). This allows the HostAgent to reference specific result sets by name when combining multiple lists.",
+        nullable: true,
+      },
+    },
+    required: ["conferenceIds"],
+  },
+};
+```
+
+**File:** `src/chatbot/language/functions/vietnamese.ts`
+
+```typescript
+export const vietnameseSaveResultSetDeclaration: FunctionDeclaration = {
+  name: "saveResultSet",
+  description:
+    "Lưu một set conference IDs dưới dạng result set có tên để tham chiếu sau bằng vị trí ordinal. Điều này cho phép HostAgent kiểm soát những conference nào được lưu và theo thứ tự nào. QUAN TRỌNG: Thứ tự của conferenceIds trong array PHẢI được bảo toàn chính xác như được cung cấp - thứ tự này sẽ được dùng cho tham chiếu ordinal (thứ 1, thứ 2, v.v.).",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      conferenceIds: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description:
+          "Array của conference IDs để lưu. Thứ tự của IDs trong array này PHẢI được bảo toàn - ID đầu tiên sẽ là vị trí 1, ID thứ hai sẽ là vị trí 2, v.v. KHÔNG được xáo trộn hoặc reorder array này.",
+        minItems: 1,
+      },
+      source: {
+        type: Type.STRING,
+        description:
+          "Nguồn của result set này: 'model' nếu được tạo bởi LLM (default), 'user' nếu được gửi bởi user trong message của họ. HostAgent nên dùng 'user' khi phát hiện list hội nghị trong message của user.",
+        enum: ["model", "user"],
+        nullable: true,
+      },
+      listName: {
+        type: Type.STRING,
+        description:
+          "Tên tùy chọn cho result set này (ví dụ: 'list1', 'list2', 'primary', 'secondary'). Điều này cho phép HostAgent tham chiếu đến các result set cụ thể theo tên khi kết hợp nhiều list.",
+        nullable: true,
+      },
+    },
+    required: ["conferenceIds"],
+  },
+};
+```
+
+#### Step R4: Bổ sung `saveResultSet` vào ConferenceAgent và HostAgent function lists
+
+**File:** `src/chatbot/utils/languageConfig.ts`
+
+```typescript
+// Trong getAgentLanguageConfig() cho ConferenceAgent:
+const functionDeclarations = [
+  // ... các functions hiện tại
+  englishSaveResultSetDeclaration, // Thêm vào
+  // ...
+];
+
+// Trong getAgentLanguageConfig() cho HostAgent:
+const functionDeclarations = [
+  // ... các functions hiện tại
+  englishSaveResultSetDeclaration, // Thêm vào (để save user lists)
+  // ...
+];
+```
+
+#### Step R5: Cập nhật ResultSetStateService để hỗ trợ named result sets + new fields
+
+**File:** `src/services/resultSetState/store.service.ts`
+
+```typescript
+// Sửa method save hoặc thêm method mới:
+async saveResultSet(
+  conversationId: string,
+  userId: string,
+  conferenceIds: string[],
+  source: "model" | "user" = "model",
+  listName?: string,
+): Promise<void> {
+  // Bảo toàn thứ tự của conferenceIds
+  const orderedConferenceIds = [...conferenceIds];
+
+  // Generate embedding cho description (dùng service có sẵn)
+  const description = listName || `result_set_${Date.now()}`;
+  const descriptionEmbedding = await this.embeddingService.generateEmbedding(description);
+
+  const state: ResultSetState = {
+    conversationId,
+    userId,
+    orderedConferenceIds,  // Thứ tự được bảo toàn
+    description,  // Đổi từ queryText
+    descriptionEmbedding,  // Đổi từ queryEmbedding
+    source,  // Thêm field source
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 20 * 60 * 1000).toISOString(),  // 20 phút
+  };
+
+  await this.model.create(state);
+}
+```
+
+#### Step R6: Cập nhật ResultSetResolver để hỗ trợ named result sets + new field names
+
+**File:** `src/services/resultSetState/resolver.service.ts`
+
+```typescript
+// Sửa method resolveAll:
+async resolveAll(
+  conversationId: string,
+  itemOrdinal: number,
+  listRef?: number | string,
+): Promise<ResolveResult> {
+  // Nếu listRef là string → tìm theo listName (nếu có) hoặc description
+  if (typeof listRef === "string") {
+    // Thử tìm theo listName trước (nếu schema có field này)
+    const state = await this.model.findOne({
+      conversationId,
+      listName: listRef,
+    });
+    if (state) {
+      return this.resolveFromState(state, itemOrdinal);
+    }
+
+    // Nếu không tìm theo listName, thử semantic match với description
+    const states = await this.model.find({ conversationId });
+    // Semantic matching logic với descriptionEmbedding
+    const matched = this.semanticMatch(listRef, states);
+    if (matched) {
+      return this.resolveFromState(matched, itemOrdinal);
+    }
+
+    return { resolvedId: null, reasonCode: "LIST_NOT_FOUND", confidence: 0 };
+  }
+
+  // Logic hiện tại cho number (ordinal) và undefined/null
+  // Cập nhật để dùng description thay vì queryText
+  // ...
+}
+```
+
+**Lưu ý:** Cập nhật mọi tham chiếu đến `queryText` và `queryEmbedding` trong resolver thành `description` và `descriptionEmbedding`.
+
+#### Step R7: Xóa auto-save trong retrieveKnowledge handler
+
+**File:** `src/chatbot/handlers/retrieveKnowledge.handler.ts`
+
+```typescript
+// Xóa hoặc comment out code auto-save (dòng 254-268 trong plan cũ)
+// ConferenceAgent sẽ chủ động gọi saveResultSet khi cần
+```
+
+#### Step R8: Cập nhật HostAgent prompt (Tiếng Anh)
+
+**File:** `src/chatbot/language/instructions/english.ts`
+
+Thêm vào section routing cho ConferenceAgent:
+
+```
+### RESULT SET SAVING — CONTROLLED BY HOST AGENT
+
+**When ConferenceAgent returns multiple result lists:**
+You (HostAgent) control how these lists are saved for later ordinal reference:
+
+**Scenario 1: Combine into single list**
+- If ConferenceAgent returns 2 lists (List 1: 10 results, List 2: 5 results) and you want to display 9 specific results to the user:
+  → Route to ConferenceAgent with ADDITIONAL_INSTRUCTION requesting it to call `saveResultSet` with the 9 specific conference IDs
+  → The IDs MUST be passed in the correct order (first ID = position 1, second ID = position 2, etc.)
+  → DO NOT pass IDs in random order
+
+**Scenario 2: Keep as separate lists**
+- If you want to display 2 separate lists (List 1: 5 results, List 2: 3 results):
+  → Route to ConferenceAgent with ADDITIONAL_INSTRUCTION requesting it to call `saveResultSet` TWICE in the SAME turn
+  → First call: saveResultSet({ conferenceIds: [ids_for_list1], listName: "list1" })
+  → Second call: saveResultSet({ conferenceIds: [ids_for_list2], listName: "list2" })
+  → CRITICAL: List 1 MUST be saved BEFORE List 2
+  → Even when calling saveResultSet in parallel (multiple function calls), ensure the calls are ordered in the response so list1 is processed first
+
+**When USER sends a conference list:**
+If the user sends a message containing conference names/IDs (e.g., "I'm interested in ICML, NeurIPS, AAAI"):
+- Extract the conference IDs (you may need to resolve names to IDs first)
+- Call `saveResultSet` yourself with `source: "user"` to save this list
+- Use a descriptive listName like "user's shortlist" or "user's AI conferences"
+- This ensures user-sent lists are trackable for later ordinal references
+
+**Important Rules:**
+- Always preserve the exact order of conference IDs passed to saveResultSet
+- When saving multiple lists, use listName parameter to distinguish them (e.g., "list1", "list2")
+- The order of saveResultSet calls determines the order of result sets for later reference
+- When saving user lists, ALWAYS use `source: "user"`
+```
+
+#### Step R9: Cập nhật HostAgent prompt (Tiếng Việt)
+
+**File:** `src/chatbot/language/instructions/vietnamese.ts`
+
+Thêm vào section routing cho ConferenceAgent:
+
+```
+### LƯU RESULT SET — ĐƯỢC CONTROL BỞI HOST AGENT
+
+**Khi ConferenceAgent trả về nhiều result lists:**
+Bạn (HostAgent) kiểm soát cách các lists này được lưu để tham chiếu ordinal sau này:
+
+**Tình huống 1: Tổng hợp thành 1 list duy nhất**
+- Nếu ConferenceAgent trả về 2 lists (List 1: 10 kết quả, List 2: 5 kết quả) và bạn muốn hiển thị 9 kết quả cụ thể cho người dùng:
+  → Route đến ConferenceAgent với ADDITIONAL_INSTRUCTION yêu cầu nó gọi `saveResultSet` với 9 conference IDs cụ thể
+  → Các IDs PHẢI được truyền theo đúng thứ tự (ID đầu tiên = vị trí 1, ID thứ hai = vị trí 2, v.v.)
+  → KHÔNG ĐƯỢC truyền IDs theo cách ngẫu nhiên
+
+**Tình huống 2: Giữ thành 2 lists riêng biệt**
+- Nếu bạn muốn hiển thị 2 lists riêng biệt (List 1: 5 kết quả, List 2: 3 kết quả):
+  → Route đến ConferenceAgent với ADDITIONAL_INSTRUCTION yêu cầu nó gọi `saveResultSet` HAI LẦN trong CÙNG MỘT turn
+  → Lần gọi đầu tiên: saveResultSet({ conferenceIds: [ids_cho_list1], listName: "list1" })
+  → Lần gọi thứ hai: saveResultSet({ conferenceIds: [ids_cho_list2], listName: "list2" })
+  → QUAN TRỌNG: List 1 PHẢI được lưu TRƯỚC List 2
+  → Ngay cả khi gọi saveResultSet song song (nhiều function calls cùng lúc), đảm bảo các calls được sắp xếp trong response để list1 được xử lý trước
+
+**Khi USER gửi list hội nghị:**
+Nếu user gửi message chứa tên/ID hội nghị (ví dụ: "Tôi quan tâm ICML, NeurIPS, AAAI"):
+- Trích xuất conference IDs (có thể cần resolve tên sang ID trước)
+- Tự gọi `saveResultSet` với `source: "user"` để lưu list này
+- Dùng listName mô tả như "user's shortlist" hoặc "user's AI conferences"
+- Điều này đảm bảo user-sent lists có thể track cho các tham chiếu ordinal sau này
+
+**Quy tắc quan trọng:**
+- Luôn bảo toàn đúng thứ tự của conference IDs được truyền cho saveResultSet
+- Khi lưu nhiều lists, dùng parameter listName để phân biệt (ví dụ: "list1", "list2")
+- Thứ tự của các lần gọi saveResultSet quyết định thứ tự của result sets để tham chiếu sau này
+- Khi lưu user lists, LUÔN LUÔN dùng `source: "user"`
+```
+
+#### Step R10: Cập nhật ConferenceAgent prompt (Tiếng Anh)
+
+**File:** `src/chatbot/language/instructions/english.ts`
+
+Thêm instruction mới:
+
+```
+### SAVE RESULT SET — CONTROLLED BY HOST AGENT
+
+You have the ability to call `saveResultSet` to save conference IDs for later ordinal reference. However, this should ONLY be done when explicitly instructed by the HostAgent via ADDITIONAL_INSTRUCTION in the taskDescription.
+
+When HostAgent instructs you to save result sets:
+- Preserve the EXACT order of conference IDs passed to saveResultSet
+- If saving multiple lists, use the listName parameter to distinguish them
+- Follow the ordering specified by HostAgent even when making parallel function calls
+```
+
+#### Step R11: Cập nhật ConferenceAgent prompt (Tiếng Việt)
+
+**File:** `src/chatbot/language/instructions/vietnamese.ts`
+
+Thêm instruction mới:
+
+```
+### LƯU RESULT SET — ĐƯỢC CONTROL BỞI HOST AGENT
+
+Bạn có khả năng gọi `saveResultSet` để lưu conference IDs để tham chiếu ordinal sau này. Tuy nhiên, điều này CHỈ nên được thực hiện khi được HostAgent hướng dẫn rõ ràng qua ADDITIONAL_INSTRUCTION trong taskDescription.
+
+Khi HostAgent hướng dẫn bạn lưu result sets:
+- Bảo toàn ĐÚNG thứ tự của conference IDs được truyền cho saveResultSet
+- Nếu lưu nhiều lists, dùng parameter listName để phân biệt
+- Tuân theo thứ tự được chỉ định bởi HostAgent ngay cả khi gọi nhiều function cùng lúc
+```
+
+#### Step R12: Cập nhật HostAgent prompt — Optimized list search pattern
+
+**File:** `src/chatbot/language/instructions/english.ts`
+
+Thêm instruction mới vào section context window priority:
+
+```
+### OPTIMIZED LIST SEARCH — SEARCH IN MODEL RESPONSES ONLY
+
+When the user refers to a conference list that you have previously shown to them (e.g., "the list from earlier", "the AI conferences you showed me", "that list from the last turn"), search for that list ONLY in messages with:
+- role: "model"
+- The LAST text part within that message
+
+**Why this optimization?**
+- Conference lists are typically displayed in model responses (not user messages or function responses)
+- The last text part in a model message is where the list content is usually shown
+- This reduces search scope and improves accuracy
+
+**Example:**
+```
+
+History:
+[
+{ role: "user", parts: [{ text: "Find AI conferences" }] },
+{ role: "model", parts: [{ functionCall: {...} }, { text: "Here are 10 AI conferences: [list content]" }] },
+{ role: "function", parts: [{ functionResponse: {...} }] },
+{ role: "model", parts: [{ text: "Based on the results..." }] }
+]
+
+User: "Show me the 2nd conference from that list"
+→ Search in role="model" messages
+→ Focus on the LAST text part of each model message
+→ Found list in the second model message (with functionCall + text)
+→ Use ordinal reference on that list
+
+```
+
+**Important:**
+- Do NOT search in role="user" messages for conference lists
+- Do NOT search in role="function" messages for conference lists
+- Focus on the LAST text part because lists are typically the final content in a model response
+- If no list found in model messages, fallback to using conferenceRef from ResultSetState
+```
+
+**File:** `src/chatbot/language/instructions/vietnamese.ts`
+
+Thêm instruction mới vào section context window priority:
+
+```
+### TỐI ƯU HÓA TÌM KIẾM LIST — CHỈ TÌM TRONG MODEL RESPONSES
+
+Khi người dùng nhắc đến một list hội nghị mà bạn đã từng show cho họ trước đó (ví dụ: "list từ trước", "các hội nghị AI bạn đã show tôi", "list đó từ turn cuối"), chỉ tìm kiếm list đó trong các tin nhắn có:
+- role: "model"
+- Phần text CUỐI CÙNG trong tin nhắn đó
+
+**Tại sao tối ưu hóa này?**
+- List hội nghị thường được hiển thị trong model responses (không phải trong user messages hay function responses)
+- Phần text cuối cùng trong một model message thường là nơi nội dung list được show
+- Điều này giảm phạm vi tìm kiếm và cải thiện độ chính xác
+
+**Ví dụ:**
+```
+
+History:
+[
+{ role: "user", parts: [{ text: "Tìm hội nghị AI" }] },
+{ role: "model", parts: [{ functionCall: {...} }, { text: "Dưới đây là 10 hội nghị AI: [nội dung list]" }] },
+{ role: "function", parts: [{ functionResponse: {...} }] },
+{ role: "model", parts: [{ text: "Dựa trên kết quả..." }] }
+]
+
+Người dùng: "Cho tôi xem hội nghị thứ 2 trong list đó"
+→ Tìm trong tin nhắn role="model"
+→ Focus vào phần text CUỐI CÙNG của mỗi model message
+→ Tìm thấy list trong model message thứ 2 (có functionCall + text)
+→ Dùng tham chiếu ordinal trên list đó
+
+```
+
+**Quan trọng:**
+- KHÔNG tìm trong tin nhắn role="user" cho list hội nghị
+- KHÔNG tìm trong tin nhắn role="function" cho list hội nghị
+- Focus vào phần text CUỐI CÙNG vì list thường là nội dung cuối cùng trong một model response
+- Nếu không tìm thấy list trong model messages, fallback sang dùng conferenceRef từ ResultSetState
+```
+
+### 11.4 Test Plan cho Refactor
+
+| #   | Test case                                                                                    | Expected                                             |
+| --- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 1   | ConferenceAgent gọi saveResultSet với 5 IDs                                                  | Success, savedCount=5                                |
+| 2   | ConferenceAgent gọi saveResultSet với listName="list1"                                       | Success, listName="list1"                            |
+| 3   | Host agent yêu cầu lưu 9 IDs theo thứ tự                                                     | Thứ tự được bảo toàn chính xác                       |
+| 4   | Host agent yêu cầu lưu 2 lists trong cùng 1 turn                                             | Cả 2 lists được lưu, list1 trước list2               |
+| 5   | ConferenceAgent gọi saveResultSet với empty array                                            | Error: conferenceIds must be non-empty array         |
+| 6   | Resolver tìm result set theo listName="list1"                                                | Tìm thấy, trả về đúng list                           |
+| 7   | Auto-save trong retrieveKnowledge đã xóa                                                     | Không còn auto-save tự động                          |
+| 8   | HostAgent detect user list và lưu với source="user"                                          | Success, source="user"                               |
+| 9   | ResultSetState có field description thay vì queryText                                        | Field name đã đổi thành description                  |
+| 10  | ResultSetState có field source                                                               | Field source tồn tại với giá trị "model" hoặc "user" |
+| 11  | HostAgent lưu user list → user reference "cái thứ 2 trong list tôi gửi" → resolve thành công | Resolve thành công, trả về đúng conference ID        |
+
+### 11.5 File structure updates
+
+```
+src/  # Easyconf-Chatbot-Server (Backend)
+  types/
+    resultSetState.types.ts                     # [SỬA] đổi tên queryText→description, queryEmbedding→descriptionEmbedding, thêm source (Step R0)
+  chatbot/
+    handlers/
+      saveResultSet.handler.ts                 # [MỚI] (Step R1)
+      retrieveKnowledge.handler.ts              # [SỬA] xóa auto-save (Step R7)
+    gemini/
+      functionRegistry.ts                       # [SỬA] thêm saveResultSet, cho phép cả ConferenceAgent và HostAgent (Step R2)
+    language/
+      functions/
+        english.ts                              # [SỬA] thêm declaration với source parameter (Step R3)
+        vietnamese.ts                           # [SỬA] thêm declaration với source parameter (Step R3)
+      instructions/
+        english.ts                              # [SỬA] thêm result set saving instruction + user list detection (Step R8, R10)
+        vietnamese.ts                            # [SỬA] thêm result set saving instruction + user list detection (Step R9, R11)
+    utils/
+      languageConfig.ts                         # [SỬA] thêm saveResultSet declaration cho cả ConferenceAgent và HostAgent (Step R4)
+  services/
+    resultSetState/
+      store.service.ts                          # [SỬA] hỗ trợ named result sets + new fields (description, descriptionEmbedding, source) (Step R5)
+      resolver.service.ts                       # [SỬA] hỗ trợ named result sets + new field names (Step R6)
+```
