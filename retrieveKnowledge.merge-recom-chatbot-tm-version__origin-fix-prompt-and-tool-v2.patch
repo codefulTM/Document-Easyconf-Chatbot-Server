@@ -1,0 +1,715 @@
+diff --git a/src/chatbot/handlers/retrieveKnowledge.handler.ts b/src/chatbot/handlers/retrieveKnowledge.handler.ts
+index 5e43b81..358d4bf 100644
+--- a/src/chatbot/handlers/retrieveKnowledge.handler.ts
++++ b/src/chatbot/handlers/retrieveKnowledge.handler.ts
+@@ -125,49 +125,39 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     const requestId = flowLogger.resolveRequestIdFromHandlerId(
+       context.handlerId,
+     );
+-    // TO-DO: validate if this code is necessary
+-    // Comment reason: DISABLED - Rule-based regex parsing for hard field refinement is brittle and
+-    // requires users to follow specific patterns (e.g., "rank A+", "in September"). This creates a
+-    // poor UX where natural language variations fail to match. With recommendation pre-filter
+-    // providing validated results from BE, this forced refinement mechanism becomes redundant.
+-    // Consider replacing with AI-based semantic understanding if needed in the future.
+-    // const forcedHardRefinement = this.isPlainObject(
+-    //   context.executionContext?.forcedHardRefinement,
+-    // )
+-    //   ? (context.executionContext.forcedHardRefinement as Record<
+-    //       string,
+-    //       unknown
+-    //     >)
+-    //   : null;
+-
+-    const forcedHardRefinement = null;
++    const forcedHardRefinement =
++      this.isPlainObject(context.executionContext?.forcedHardRefinement)
++        ? (context.executionContext.forcedHardRefinement as Record<
++            string,
++            unknown
++          >)
++        : null;
+     const effectiveArgs: Record<string, any> = { ...args };
+ 
+-    // DISABLED - See comment reason above
+-    // if (forcedHardRefinement) {
+-    //   const forcedFilter = this.isPlainObject(forcedHardRefinement.filter)
+-    //     ? forcedHardRefinement.filter
+-    //     : {};
+-    //   const forcedConferenceRef = this.isPlainObject(
+-    //     forcedHardRefinement.conferenceRef,
+-    //   )
+-    //     ? forcedHardRefinement.conferenceRef
+-    //     : null;
+-    //   if (forcedConferenceRef) {
+-    //     effectiveArgs.conferenceRef = forcedConferenceRef;
+-    //   }
+-    //   effectiveArgs.filter = {
+-    //     ...(this.isPlainObject(effectiveArgs.filter) ? effectiveArgs.filter : {}),
+-    //     ...forcedFilter,
+-    //   };
+-    //   // Forced refinements are scoped by conferenceRef/result-set IDs. Dropping the
+-    //   // free-text query prevents hybrid/vector retrieval from widening the search.
+-    //   effectiveArgs.query = undefined;
+-    //   effectiveArgs.listMode = false;
+-    //   effectiveArgs.conferenceFields = this.buildForcedDetailConferenceFields(
+-    //     Boolean(forcedHardRefinement.requireRanks),
+-    //   );
+-    // }
++    if (forcedHardRefinement) {
++      const forcedFilter = this.isPlainObject(forcedHardRefinement.filter)
++        ? forcedHardRefinement.filter
++        : {};
++      const forcedConferenceRef = this.isPlainObject(
++        forcedHardRefinement.conferenceRef,
++      )
++        ? forcedHardRefinement.conferenceRef
++        : null;
++      if (forcedConferenceRef) {
++        effectiveArgs.conferenceRef = forcedConferenceRef;
++      }
++      effectiveArgs.filter = {
++        ...(this.isPlainObject(effectiveArgs.filter) ? effectiveArgs.filter : {}),
++        ...forcedFilter,
++      };
++      // Forced refinements are scoped by conferenceRef/result-set IDs. Dropping the
++      // free-text query prevents hybrid/vector retrieval from widening the search.
++      effectiveArgs.query = undefined;
++      effectiveArgs.listMode = false;
++      effectiveArgs.conferenceFields = this.buildForcedDetailConferenceFields(
++        Boolean(forcedHardRefinement.requireRanks),
++      );
++    }
+ 
+     const query = effectiveArgs.query;
+     const rawFilter = effectiveArgs.filter;
+@@ -177,10 +167,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     let effectiveFilter = rawFilter;
+ 
+     if (this.isPlainObject(effectiveArgs.conferenceRef)) {
+-      const conferenceRef = effectiveArgs.conferenceRef as Record<
+-        string,
+-        unknown
+-      >;
++      const conferenceRef = effectiveArgs.conferenceRef as Record<string, unknown>;
+       const itemOrdinal =
+         typeof conferenceRef.item === "number" ? conferenceRef.item : undefined;
+ 
+@@ -192,47 +179,47 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+         };
+       }
+ 
+-      // Validate itemOrdinal nếu có
+-      const result = await this.resultSetResolver.resolveAll(
+-        conversationId,
+-        itemOrdinal,
+-        conferenceRef as {
+-          description?: string;
+-          source?: "model" | "user";
+-          ordinal?: number;
+-        },
+-      );
++        // Validate itemOrdinal nếu có
++        const result = await this.resultSetResolver.resolveAll(
++          conversationId,
++          itemOrdinal,
++          conferenceRef as {
++            description?: string;
++            source?: "model" | "user";
++            ordinal?: number;
++          },
++        );
+ 
+-      if (
+-        !result.resolvedIdentifiers ||
+-        result.resolvedIdentifiers.length === 0
+-      ) {
+-        return {
+-          modelResponseContent: JSON.stringify({
+-            error: "out_of_range_reference",
+-            message: `Cannot resolve conferenceRef.`,
+-            reasonCode: result.reasonCode,
+-          }),
+-        };
+-      }
++        if (
++          !result.resolvedIdentifiers ||
++          result.resolvedIdentifiers.length === 0
++        ) {
++          return {
++            modelResponseContent: JSON.stringify({
++              error: "out_of_range_reference",
++              message: `Cannot resolve conferenceRef.`,
++              reasonCode: result.reasonCode,
++            }),
++          };
++        }
+ 
+-      // Filter theo identifiers - map dựa trên type
+-      const filterByIds = result.resolvedIdentifiers
+-        .filter((id) => id.type === "id")
+-        .map((id) => id.value);
+-      const filterByAcronyms = result.resolvedIdentifiers
+-        .filter((id) => id.type === "acronym")
+-        .map((id) => id.value);
+-      const filterByTitles = result.resolvedIdentifiers
+-        .filter((id) => id.type === "title")
+-        .map((id) => id.value);
+-
+-      effectiveFilter = {
+-        ...rawFilter,
+-        ...(filterByIds.length > 0 && { id: filterByIds }),
+-        ...(filterByAcronyms.length > 0 && { acronym: filterByAcronyms }),
+-        ...(filterByTitles.length > 0 && { title: filterByTitles }),
+-      };
++        // Filter theo identifiers - map dựa trên type
++        const filterByIds = result.resolvedIdentifiers
++          .filter((id) => id.type === "id")
++          .map((id) => id.value);
++        const filterByAcronyms = result.resolvedIdentifiers
++          .filter((id) => id.type === "acronym")
++          .map((id) => id.value);
++        const filterByTitles = result.resolvedIdentifiers
++          .filter((id) => id.type === "title")
++          .map((id) => id.value);
++
++        effectiveFilter = {
++          ...rawFilter,
++          ...(filterByIds.length > 0 && { id: filterByIds }),
++          ...(filterByAcronyms.length > 0 && { acronym: filterByAcronyms }),
++          ...(filterByTitles.length > 0 && { title: filterByTitles }),
++        };
+     }
+ 
+     if (!conferenceFields || typeof conferenceFields !== "object") {
+@@ -299,10 +286,9 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+       effectiveFilter,
+     );
+     const listMode =
+-      typeof effectiveArgs.listMode === "boolean" &&
+-      effectiveArgs.listMode === true
++      explicitListMode === true && !hasSpecificConferenceFilter
+         ? true
+-        : isSpecificConferenceIntent
++        : isSpecificConferenceIntent || hasSpecificConferenceFilter
+           ? false
+           : listModeFromRouter;
+ 
+@@ -353,8 +339,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     // }
+ 
+     // Read limit from user input; default to 10 if not provided.
+-    let limit =
+-      typeof effectiveArgs.limit === "number" ? effectiveArgs.limit : 10;
++    let limit = typeof effectiveArgs.limit === "number" ? effectiveArgs.limit : 10;
+ 
+     // Optional: enforce a sane range for limit.
+     const MIN_LIMIT = 1;
+@@ -362,9 +347,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     if (limit < MIN_LIMIT) limit = MIN_LIMIT;
+     if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+ 
+-    // --- Recommendation Pre-filter ---
+-    let skipEntityDict = false;
+-    let usedRecommendationFilter = false;
++    let skipEntityDictionary = false;
+     const recommendationFilterWasExplicit =
+       typeof effectiveArgs.useRecommendationFilter === "boolean";
+     const useRecommendationFilter =
+@@ -378,11 +361,12 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     if (shouldUseRecommendationFilter) {
+       const recFilterStart = Date.now();
+       const recommendationTopics = this.extractTopicsFromQuery(query);
+-      const recommendationQueryMode = this.classifyRecommendationQueryMode(
+-        query,
+-        recommendationTopics,
+-        effectiveFilter,
+-      );
++      const recommendationQueryMode =
++        this.classifyRecommendationQueryMode(
++          query,
++          recommendationTopics,
++          effectiveFilter,
++        );
+       const usePoolAsCandidates =
+         recommendationQueryMode === "generic_recommendation";
+       const useDefaultTop300Universe =
+@@ -435,10 +419,8 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+             recommendationPoolIds.length,
+           );
+           const finalIds = finalMatch.finalIds;
+-          const outsidePoolDroppedCount = this.countOutsideRecommendationPool(
+-            recommendationPoolIds,
+-            candidateIds,
+-          );
++          const outsidePoolDroppedCount =
++            this.countOutsideRecommendationPool(recommendationPoolIds, candidateIds);
+           const verificationSummary =
+             this.buildRecommendationVerificationSummary({
+               recommendationPoolIds,
+@@ -497,7 +479,13 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+               }),
+             };
+             const compactText = JSON.stringify(compactPayload);
+-            // AI will handle saveVisibleResultSet
++            await this.saveVisibleResultSet({
++              conversationId,
++              query,
++              mode: compactPayload.mode,
++              items: compactPayload.items,
++              forcedHardRefinement: false,
++            });
+             const recommendationFlowLog = {
+               query,
+               topics: recommendationTopics,
+@@ -534,8 +522,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+               strictTopicAliases: candidateMatch.strictTopicAliases,
+               topicCandidateCountBeforeStrict:
+                 candidateMatch.topicCandidateCountBeforeStrict,
+-              strictTopicCandidateCount:
+-                candidateMatch.strictTopicCandidateCount,
++              strictTopicCandidateCount: candidateMatch.strictTopicCandidateCount,
+               topicCandidateCountAfterStrict:
+                 candidateMatch.topicCandidateCountAfterStrict,
+               ragFallbackCandidateCount:
+@@ -700,24 +687,22 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+         );
+       }
+     }
+-    // --- END Recommendation Pre-filter ---
++
+     try {
+       onStatusUpdate("status_update", {
+         type: "status",
+         step: "retrieving_knowledge",
+-        message: usedRecommendationFilter
+-          ? `Searching personalized recommendations for: "${query}" (limit=${limit})`
+-          : `Searching knowledge base for: "${query}" (limit=${limit})`,
++        message: `Searching knowledge base for: "${query}" (limit=${limit})`,
+         agentId: agentId,
+       });
+ 
+-      let results = await this.retrievalService.retrieve(query, {
++      const results = await this.retrievalService.retrieve(query, {
+         filter: effectiveFilter,
+         limit,
+         keywordWeight: 0.3,
+         vectorWeight: 0.7,
+         listMode,
+-        skipEntityDictionary: skipEntityDict,
++        skipEntityDictionary,
+       });
+ 
+       if (!results || results.length === 0) {
+@@ -748,8 +733,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+           listMode: listMode || false,
+           compactDates: listMode || false,
+           timeZone:
+-            typeof effectiveArgs.timeZone === "string" &&
+-            effectiveArgs.timeZone.length > 0
++            typeof effectiveArgs.timeZone === "string" && effectiveArgs.timeZone.length > 0
+               ? effectiveArgs.timeZone
+               : undefined,
+           conferenceFields: conferenceFields,
+@@ -783,25 +767,20 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+         };
+       });
+ 
+-      const compactPayload: Record<string, any> = {
++      const compactPayload = {
+         mode: isConferenceListMode ? "conference_list" : "conference_detail",
+         count: enrichedItems.length,
+         items: enrichedItems,
+       };
+ 
+-      if (!usedRecommendationFilter) {
+-        compactPayload.note =
+-          "These conferences are available in the system but were not in your personalized recommendations.";
+-      }
+-
+       const compactText = JSON.stringify(compactPayload);
+-      // await this.saveVisibleResultSet({
+-      //   conversationId,
+-      //   query,
+-      //   mode: compactPayload.mode,
+-      //   items: compactPayload.items,
+-      //   forcedHardRefinement: Boolean(forcedHardRefinement),
+-      // });
++      await this.saveVisibleResultSet({
++        conversationId,
++        query,
++        mode: compactPayload.mode,
++        items: compactPayload.items,
++        forcedHardRefinement: Boolean(forcedHardRefinement),
++      });
+ 
+       console.log("[RetrieveKnowledgeHandler] compact list payload prepared", {
+         query,
+@@ -940,9 +919,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     }
+   }
+ 
+-  private buildForcedDetailConferenceFields(
+-    includeRanks: boolean,
+-  ): Record<string, any> {
++  private buildForcedDetailConferenceFields(includeRanks: boolean): Record<string, any> {
+     return {
+       id: true,
+       title: true,
+@@ -1108,16 +1085,11 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+       if (Array.isArray(value)) {
+         return value.some((item) => String(item || "").trim().length > 0);
+       }
+-      return (
+-        value !== undefined && value !== null && String(value).trim() !== ""
+-      );
++      return value !== undefined && value !== null && String(value).trim() !== "";
+     });
+   }
+ 
+-  private applyInferredLocationFilter(
+-    query: string | undefined,
+-    filter: any,
+-  ): any {
++  private applyInferredLocationFilter(query: string | undefined, filter: any): any {
+     if (
+       !filter ||
+       typeof filter !== "object" ||
+@@ -1153,12 +1125,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+         .filter(Boolean);
+     };
+ 
+-    for (const key of [
+-      "country",
+-      "continent",
+-      "cityStateProvince",
+-      "location",
+-    ]) {
++    for (const key of ["country", "continent", "cityStateProvince", "location"]) {
+       if (!this.hasNonEmptyFilterValue(normalizedFilter[key])) {
+         continue;
+       }
+@@ -1188,23 +1155,16 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   }
+ 
+   private hasStructuredLocationFilter(filter: any): boolean {
+-    return [
+-      "country",
+-      "continent",
+-      "cityStateProvince",
+-      "location",
+-      "address",
+-    ].some((key) => this.hasNonEmptyFilterValue(filter?.[key]));
++    return ["country", "continent", "cityStateProvince", "location", "address"].some(
++      (key) => this.hasNonEmptyFilterValue(filter?.[key]),
++    );
+   }
+ 
+   private inferCountryFromQuery(query: string | undefined): string | undefined {
+     const q = ` ${String(query || "").toLowerCase()} `;
+     const countryAliases: Array<[RegExp, string]> = [
+       [/\b(u\.?s\.?a\.?|united states|america|american)\b/i, "United States"],
+-      [
+-        /\b(u\.?k\.?|united kingdom|great britain|england)\b/i,
+-        "United Kingdom",
+-      ],
++      [/\b(u\.?k\.?|united kingdom|great britain|england)\b/i, "United Kingdom"],
+       [/\bviet\s?nam\b/i, "Vietnam"],
+       [/\bsingapore\b/i, "Singapore"],
+       [/\bjapan\b/i, "Japan"],
+@@ -1455,12 +1415,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+       const isShortTopicAlias = normalized.length <= 3 && hasAliasMap;
+       const isPhrase = normalized.includes(" ");
+ 
+-      if (
+-        hasAliasMap ||
+-        isPhrase ||
+-        isShortTopicAlias ||
+-        normalized.length >= 4
+-      ) {
++      if (hasAliasMap || isPhrase || isShortTopicAlias || normalized.length >= 4) {
+         if (!genericSingleTerms.has(normalized) || hasAliasMap || isPhrase) {
+           aliases.add(normalized);
+         }
+@@ -1803,10 +1758,8 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+       recommendationPoolSource,
+       recommendationApiParams,
+     } = params;
+-    const finalIsSubsetOfRecommendationPool = this.isSubsetOfRecommendationPool(
+-      recommendationPoolIds,
+-      finalIds,
+-    );
++    const finalIsSubsetOfRecommendationPool =
++      this.isSubsetOfRecommendationPool(recommendationPoolIds, finalIds);
+     const finalOrderMatchesRecommendationPool =
+       this.isOrderedByRecommendationPool(recommendationPoolIds, finalIds);
+     const candidateOutsidePoolCount = this.countOutsideRecommendationPool(
+@@ -1883,21 +1836,16 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+       timeZone: params.timeZone,
+     });
+ 
+-    console.log(
+-      "[RetrieveKnowledgeHandler] Saved constrained recommendation continuation state",
+-      {
+-        totalEligibleCount: orderedIds.length,
+-        offset,
+-        remaining: Math.max(0, orderedIds.length - offset),
+-        perPage: params.perPage,
+-        query: params.query,
+-      },
+-    );
++    console.log("[RetrieveKnowledgeHandler] Saved constrained recommendation continuation state", {
++      totalEligibleCount: orderedIds.length,
++      offset,
++      remaining: Math.max(0, orderedIds.length - offset),
++      perPage: params.perPage,
++      query: params.query,
++    });
+   }
+ 
+-  private stripRecommendationContinuationFilter(
+-    filter: any,
+-  ): Record<string, any> {
++  private stripRecommendationContinuationFilter(filter: any): Record<string, any> {
+     if (!filter || typeof filter !== "object") {
+       return {};
+     }
+@@ -1912,20 +1860,12 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   ): boolean {
+     const recommendationSet = new Set(
+       recommendationPoolIds
+-        .map((id) =>
+-          String(id || "")
+-            .trim()
+-            .toLowerCase(),
+-        )
++        .map((id) => String(id || "").trim().toLowerCase())
+         .filter(Boolean),
+     );
+ 
+     return finalIds.every((id) =>
+-      recommendationSet.has(
+-        String(id || "")
+-          .trim()
+-          .toLowerCase(),
+-      ),
++      recommendationSet.has(String(id || "").trim().toLowerCase()),
+     );
+   }
+ 
+@@ -1935,9 +1875,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   ): boolean {
+     const recommendationOrder = new Map<string, number>();
+     recommendationPoolIds.forEach((id, index) => {
+-      const normalizedId = String(id || "")
+-        .trim()
+-        .toLowerCase();
++      const normalizedId = String(id || "").trim().toLowerCase();
+       if (normalizedId && !recommendationOrder.has(normalizedId)) {
+         recommendationOrder.set(normalizedId, index);
+       }
+@@ -1945,9 +1883,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+ 
+     let previousIndex = -1;
+     for (const id of finalIds) {
+-      const normalizedId = String(id || "")
+-        .trim()
+-        .toLowerCase();
++      const normalizedId = String(id || "").trim().toLowerCase();
+       const currentIndex = recommendationOrder.get(normalizedId);
+       if (currentIndex === undefined || currentIndex < previousIndex) {
+         return false;
+@@ -1961,25 +1897,15 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   private intersectCandidateIds(left: string[], right: string[]): string[] {
+     const rightSet = new Set(
+       right
+-        .map((id) =>
+-          String(id || "")
+-            .trim()
+-            .toLowerCase(),
+-        )
++        .map((id) => String(id || "").trim().toLowerCase())
+         .filter(Boolean),
+     );
+     const seen = new Set<string>();
+     const result: string[] = [];
+ 
+     for (const id of left) {
+-      const normalizedId = String(id || "")
+-        .trim()
+-        .toLowerCase();
+-      if (
+-        !normalizedId ||
+-        seen.has(normalizedId) ||
+-        !rightSet.has(normalizedId)
+-      ) {
++      const normalizedId = String(id || "").trim().toLowerCase();
++      if (!normalizedId || seen.has(normalizedId) || !rightSet.has(normalizedId)) {
+         continue;
+       }
+       seen.add(normalizedId);
+@@ -1992,25 +1918,15 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   private differenceCandidateIds(left: string[], right: string[]): string[] {
+     const rightSet = new Set(
+       right
+-        .map((id) =>
+-          String(id || "")
+-            .trim()
+-            .toLowerCase(),
+-        )
++        .map((id) => String(id || "").trim().toLowerCase())
+         .filter(Boolean),
+     );
+     const seen = new Set<string>();
+     const result: string[] = [];
+ 
+     for (const id of left) {
+-      const normalizedId = String(id || "")
+-        .trim()
+-        .toLowerCase();
+-      if (
+-        !normalizedId ||
+-        seen.has(normalizedId) ||
+-        rightSet.has(normalizedId)
+-      ) {
++      const normalizedId = String(id || "").trim().toLowerCase();
++      if (!normalizedId || seen.has(normalizedId) || rightSet.has(normalizedId)) {
+         continue;
+       }
+       seen.add(normalizedId);
+@@ -2030,9 +1946,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+ 
+     for (const group of groups) {
+       for (const id of group) {
+-        const normalizedId = String(id || "")
+-          .trim()
+-          .toLowerCase();
++        const normalizedId = String(id || "").trim().toLowerCase();
+         if (!normalizedId || seen.has(normalizedId)) {
+           continue;
+         }
+@@ -2077,11 +1991,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   } {
+     const candidateSet = new Set(
+       [...candidateIds]
+-        .map((id) =>
+-          String(id || "")
+-            .trim()
+-            .toLowerCase(),
+-        )
++        .map((id) => String(id || "").trim().toLowerCase())
+         .filter(Boolean),
+     );
+     const chunks = [
+@@ -2097,11 +2007,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     ];
+     const chunkMatches = chunks.map((chunk) =>
+       chunk.filter((id) =>
+-        candidateSet.has(
+-          String(id || "")
+-            .trim()
+-            .toLowerCase(),
+-        ),
++        candidateSet.has(String(id || "").trim().toLowerCase()),
+       ),
+     );
+     const finalIds: string[] = [];
+@@ -2139,19 +2045,13 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   ): number {
+     const recommendationSet = new Set(
+       recommendationIds
+-        .map((id) =>
+-          String(id || "")
+-            .trim()
+-            .toLowerCase(),
+-        )
++        .map((id) => String(id || "").trim().toLowerCase())
+         .filter(Boolean),
+     );
+ 
+     let count = 0;
+     for (const id of candidateIds) {
+-      const normalizedId = String(id || "")
+-        .trim()
+-        .toLowerCase();
++      const normalizedId = String(id || "").trim().toLowerCase();
+       if (normalizedId && !recommendationSet.has(normalizedId)) {
+         count += 1;
+       }
+@@ -2160,9 +2060,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+   }
+ 
+   private getChunkConferenceId(chunk: Chunk): string | undefined {
+-    const id = String(
+-      chunk.metadata?.recordId || chunk.metadata?.id || "",
+-    ).trim();
++    const id = String(chunk.metadata?.recordId || chunk.metadata?.id || "").trim();
+     return id || undefined;
+   }
+ 
+@@ -2185,9 +2083,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+ 
+     const orderedResults: Chunk[] = [];
+     for (const id of orderedIds) {
+-      const normalizedId = String(id || "")
+-        .trim()
+-        .toLowerCase();
++      const normalizedId = String(id || "").trim().toLowerCase();
+       const bucket = chunksById.get(normalizedId);
+       const chunk = bucket?.shift();
+       if (chunk) {
+@@ -2365,19 +2261,7 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+     const hints = new Set<string>();
+ 
+     const TOPIC_ACRONYMS = new Set([
+-      "AI",
+-      "ML",
+-      "DL",
+-      "CV",
+-      "NLP",
+-      "RL",
+-      "QA",
+-      "IR",
+-      "DB",
+-      "OS",
+-      "PL",
+-      "SE",
+-      "HCI",
++      "AI", "ML", "DL", "CV", "NLP", "RL", "QA", "IR", "DB", "OS", "PL", "SE", "HCI",
+     ]);
+ 
+     const acronymMatches = query.match(/\b[A-Z0-9]{2,10}\b/g) || [];
+@@ -2524,7 +2408,8 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+         return {
+           type: "id" as const,
+           value,
+-          acronym: typeof item?.acronym === "string" ? item.acronym : undefined,
++          acronym:
++            typeof item?.acronym === "string" ? item.acronym : undefined,
+           title: typeof item?.title === "string" ? item.title : undefined,
+         };
+       })
+@@ -2560,16 +2445,13 @@ export class RetrieveKnowledgeHandler implements IFunctionHandler {
+         firstIds: identifiers.slice(0, 5).map((item) => item.value),
+       });
+     } catch (error) {
+-      console.error(
+-        "[RetrieveKnowledgeHandler] Save visible result set failed",
+-        {
+-          conversationId,
+-          mode,
+-          count: identifiers.length,
+-          forcedHardRefinement,
+-          error,
+-        },
+-      );
++      console.error("[RetrieveKnowledgeHandler] Save visible result set failed", {
++        conversationId,
++        mode,
++        count: identifiers.length,
++        forcedHardRefinement,
++        error,
++      });
+     }
+   }
+ 
