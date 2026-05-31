@@ -117,7 +117,7 @@ Repo `Easyconf-FE-Client` đã có thư mục `src/app/[locale]/chatbot/livechat
 
 | Thành phần | Trạng thái | Ghi chú |
 |-----------|-----------|---------|
-| Server Live Gateway (`src/live/`) | ✅ **Đã có Phase 1** | WebSocket endpoint, session manager, Gemini bridge, auth, rate limit, config. Cần mở rộng tool execution và multi-agent |
+| Server Live Gateway (`src/live/`) | ✅ **Đã có Phase 1** | WebSocket endpoint, session manager, Gemini bridge (parse `LiveServerMessage` + dispatch), auth (JWT + `ConfigService`), `LiveConfig`, idle timeout 10 phút, binary BE→FE audio, frame size guard + warning |
 | FE Live Chat (voice, tool, UI) | ✅ **Đã có gần hoàn chỉnh** | ~40 files: mic, loa, tool handlers, logger, UI. **Cần refactor** để chuyển từ direct SDK sang server bridge |
 | Screen Sharing | ❌ **Chưa có** | Server đã hỗ trợ video frame (`BINARY_HEADER_VIDEO`, `sendVideo()`). FE chưa implement `getDisplayMedia()` + gửi frame |
 | Multi-Agent Orchestration | ❌ **Chưa có** | Greenfield. Phase 4 của plan |
@@ -146,6 +146,7 @@ Các format nên giữ:
 | Audio output | `audio/pcm;rate=24000`, 16-bit signed PCM, mono |
 | Screen frame | `image/jpeg`, khuyến nghị 1 FPS hoặc thấp hơn khi không cần realtime cao |
 | Transport FE -> Server | WebSocket, **binary frame** với 1-byte header (`0x01`=audio, `0x02`=video). Text frame dùng JSON cho control message |
+| Transport Server -> FE | Audio: **binary frame `0x01`** (raw PCM 24kHz, không base64). Transcript/tool/status: JSON text frame |
 | Transport Server -> Gemini | `session.sendRealtimeInput({ audio/video/text })` |
 
 ## 3. Kiến trúc đề xuất
@@ -255,7 +256,6 @@ Query/header cần có:
 | Trường | Mục đích |
 | --- | --- |
 | `Authorization: Bearer <token>` | Xác thực user nếu có |
-| `conversationId` | Gắn live session với conversation/history |
 | `locale` | Ngôn ngữ phản hồi, mặc định `vi` |
 | `mode=voice-screen` | Phân biệt live mode với text mode |
 
@@ -274,7 +274,7 @@ Không cần JSON, không base64. Server đọc byte 0, switch, xử lý phần 
 
 | Type | Payload | Ghi chú |
 | --- | --- | --- |
-| `session.start` | `{ conversationId, locale, model, voice, responseModalities }` | Khởi tạo Live session |
+| `session.start` | `{ locale, model, voice, responseModalities }` | Khởi tạo Live session |
 | `session.stop` | `{ reason? }` | Kết thúc chủ động |
 | `text` | `{ text }` | Fallback text hoặc debug |
 | `tool.confirmation` | `{ confirmationId, decision }` | User xác nhận/cancel action nhạy cảm |
@@ -283,8 +283,8 @@ Không cần JSON, không base64. Server đọc byte 0, switch, xử lý phần 
 
 | Type | Payload | Ghi chú |
 | --- | --- | --- |
-| `session.ready` | `{ userId, locale, conversationId }` | Server đã mở Gemini Live session, kèm thông tin xác thực |
-| `audio` | `{ data: base64, mimeType: "audio/pcm;rate=24000" }` | FE decode và phát |
+| `session.ready` | `{ userId, locale, screenMaxBytes }` | Server đã mở Gemini Live session, kèm thông tin xác thực |
+| `audio` | **Binary frame** `0x01` + raw PCM 24kHz | Dùng header `0x01` như FE→BE, FE đọc `ArrayBuffer` và đưa vào `AudioStreamer.addPCM16()` |
 | `transcript` | `{ source: "user" | "model", text, final }` | Hiển thị phụ đề/log |
 | `agent-status` | `StatusUpdate` | Cho UI biết agent đang làm gì |
 | `thought` | `ThoughtStep` | Debug/trace, có thể ẩn với user thường |
@@ -320,32 +320,32 @@ Thêm module mới trong `Easyconf-Chatbot-Server`:
 
 ```text
 src/live/
-  live.routes.ts hoặc live.ws.ts
+  live.routes.ts
   liveSessionManager.ts
   liveGeminiBridge.ts
   liveMessage.types.ts
   liveAuth.ts
-  liveRateLimiter.ts
 ```
 
 Nhiệm vụ:
 
 - Tạo WebSocket endpoint `/api/live-agent`.
-- Validate auth token và lấy `userId`, `locale`, `conversationId`.
+- Validate auth token bằng `validateLiveAuth()` → `{ userId, locale }`.
 - Khởi tạo `GoogleGenAI` từ server env, không nhận API key từ FE.
 - Mở `ai.live.connect({ model, config, callbacks })`.
 - Forward audio/video/text từ FE vào `session.sendRealtimeInput()`.
-- Forward audio/transcript/tool/status từ Gemini về FE.
+- Parse Gemini `LiveServerMessage`: extract audio data (base64 → binary) + transcript + tool call, dispatch đúng callback.
+- Forward audio về FE dùng binary frame `0x01` (raw PCM, không base64), transcript/tool/status dùng JSON text frame.
 - Cleanup session khi FE disconnect, user stop, lỗi Gemini, timeout idle.
 
-Config đề xuất:
+Config: dùng `LiveConfig` class (`src/config/live.config.ts`) đọc từ schema, wire vào `ConfigService`:
 
 | Biến env | Mục đích | Default gợi ý |
 | --- | --- | --- |
 | `LIVE_AGENT_ENABLED` | Bật/tắt live endpoint | `false` |
-| `LIVE_AGENT_MODEL` | Model live | model Gemini Live đang được Google hỗ trợ tại thời điểm triển khai |
+| `LIVE_AGENT_MODEL` | Model live | `gemini-live` |
 | `LIVE_AGENT_MAX_SESSION_MS` | Giới hạn thời lượng session | `900000` |
-| `LIVE_AGENT_IDLE_TIMEOUT_MS` | Đóng nếu không có input | `120000` |
+| `LIVE_AGENT_IDLE_TIMEOUT_MS` | Đóng nếu không có input | `600000` (10 phút) |
 | `LIVE_AGENT_AUDIO_BINARY` | Cho phép binary audio | `true` |
 | `LIVE_AGENT_SCREEN_FPS` | FPS server chấp nhận | `1` |
 | `LIVE_AGENT_SCREEN_MAX_BYTES` | Giới hạn frame JPEG | `250000` |
@@ -411,7 +411,7 @@ src/live/tools/
 Adapter cần làm:
 
 - Map function call từ Gemini/ADK sang handler cũ.
-- Inject context gồm `userToken`, `socket/session`, `conversationId`, `agentId`, `language`, `screenContext`.
+- Inject context gồm `userToken`, `sessionId`, `agentId`, `language`, `screenContext`.
 - Convert kết quả handler thành function response cho Gemini.
 - Tách `messageForModel` và `frontendActions`.
 - Gửi status/thought về FE trong lúc tool chạy.
@@ -543,7 +543,6 @@ src/live/liveSessionManager.ts
 src/live/liveGeminiBridge.ts
 src/live/liveMessage.types.ts
 src/live/liveAuth.ts
-src/live/liveRateLimiter.ts
 src/live/liveAgentOrchestrator.ts
 src/live/tools/liveToolRegistry.ts
 src/live/tools/liveToolAdapter.ts
@@ -552,11 +551,12 @@ src/live/screen/liveScreenState.ts
 
 Tích hợp vào bootstrap:
 
-- Mount WebSocket cùng HTTP server hiện có.
+- Mount WebSocket cùng HTTP server hiện có: `const liveWss = initLiveGateway(httpServer)`.
+- `liveWss` được trả về trong `LoadersResult` cùng với `app`, `httpServer`, `io`.
 - Không thay đổi route `/api/v1/chatbot`, Socket.IO regular chat và các handler text hiện tại.
 - Validate origin/CORS.
 - Log session lifecycle.
-- Shutdown graceful: đóng tất cả live sessions khi server stop.
+- Shutdown graceful: `closeAllLiveSessions("server_shutdown")` được gọi từ `gracefulShutdown` trong `server.ts` (Bước 4), sau khi đóng Playwright và trước khi flush logs.
 
 Tái sử dụng code hiện có qua adapter, giữ tương thích ngược:
 
