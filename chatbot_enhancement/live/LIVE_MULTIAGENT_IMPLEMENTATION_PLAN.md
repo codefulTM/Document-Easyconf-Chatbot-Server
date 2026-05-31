@@ -100,7 +100,7 @@ Repo `Easyconf-FE-Client` đã có thư mục `src/app/[locale]/chatbot/livechat
 | `hooks/useVolumeControl.ts` | Điều khiển volume |
 | `lib/audio-recorder.ts` | Thu âm bằng `AudioWorklet`, PCM 16kHz mono, có thể chuyển sang gửi binary frame |
 | `lib/audio-streamer.ts` | Phát PCM 24kHz output với queue/buffer management |
-| `services/tool.handlers.ts` | FE tự xử lý **8 tool handlers** (search, follow, calendar, navigation, admin contact...) |
+| ~~`services/tool.handlers.ts`~~ | ~~FE tự xử lý tool handlers~~ → Đã bỏ, server execute tool trực tiếp |
 | `logger/*` | Hệ thống log message/tool/audio/transcription đầy đủ |
 | `LiveChat.tsx` + `layout/*` | UI live chat hoàn chỉnh: mic button, connection status, transcript, logger |
 | `contexts/*` | React context cho live API và settings |
@@ -109,8 +109,8 @@ Repo `Easyconf-FE-Client` đã có thư mục `src/app/[locale]/chatbot/livechat
 
 - Không để FE giữ Gemini API key.
 - Không để FE tự gọi `genAI.live.connect()` trong production.
-- Không để FE tự xử lý tool nghiệp vụ quan trọng như follow/calendar/email nếu cần token, audit, validation.
-- FE nên trở thành client media/UI: thu âm, chụp màn hình, phát audio, hiển thị status/action.
+- **Không để FE xử lý tool nghiệp vụ** — server execute toàn bộ tool bằng `liveToolAdapter` (tái sử dụng handler text chatbot hiện có).
+- FE nên trở thành client media/UI: thu âm, chụp màn hình, phát audio, hiển thị transcript/status/frontend-action.
 - Chatbot Server nên có thêm Live Gateway riêng: mở Gemini Live session, điều phối live multi-agent, gọi tool backend.
 
 ### 2.3 Tổng quan hiện trạng thực tế so với plan
@@ -118,8 +118,10 @@ Repo `Easyconf-FE-Client` đã có thư mục `src/app/[locale]/chatbot/livechat
 | Thành phần | Trạng thái | Ghi chú |
 |-----------|-----------|---------|
 | Server Live Gateway (`src/live/`) | ✅ **Đã có Phase 1** | WebSocket endpoint, session manager, Gemini bridge (parse `LiveServerMessage` + dispatch), auth (JWT + `ConfigService`), `LiveConfig`, idle timeout 10 phút, binary BE→FE audio, frame size guard + warning |
-| FE Live Chat (voice, tool, UI) | ✅ **Đã có gần hoàn chỉnh** | ~40 files: mic, loa, tool handlers, logger, UI. **Cần refactor** để chuyển từ direct SDK sang server bridge |
-| Screen Sharing | ❌ **Chưa có** | Server đã hỗ trợ video frame (`BINARY_HEADER_VIDEO`, `sendVideo()`). FE chưa implement `getDisplayMedia()` + gửi frame |
+| FE Live Chat (voice, tool, UI) | 🔄 **Đang refactor (Phase 2)** | Chuyển từ direct SDK sang server bridge + thêm AEC (WebRTC loopback) |
+| Screen Sharing | 🔄 **Trong Phase 2** | Server đã hỗ trợ video frame. FE sẽ implement `useScreenShare.ts` + `screenFrameCapture.ts` |
+| Acoustic Echo Cancellation | 🔄 **Trong Phase 2** | WebRTC loopback technique. Gộp 2 AudioContext → 1 shared context. Route AI audio qua RTCPeerConnection local để browser AEC3 cancel |
+| Tool Adapter (`src/live/tools/liveToolAdapter.ts`) | ✅ **Đã merge vào Phase 2** | Server execute tool trực tiếp, không forward FE |
 | Multi-Agent Orchestration | ❌ **Chưa có** | Greenfield. Phase 4 của plan |
 | ADK Integration | ❌ **Chưa có** | Greenfield. Phase 4 mức B |
 | Database / History | ❌ **Chưa có** | Phase 6 |
@@ -277,7 +279,8 @@ Không cần JSON, không base64. Server đọc byte 0, switch, xử lý phần 
 | `session.start` | `{ locale, model, voice, responseModalities }` | Khởi tạo Live session |
 | `session.stop` | `{ reason? }` | Kết thúc chủ động |
 | `text` | `{ text }` | Fallback text hoặc debug |
-| `tool.confirmation` | `{ confirmationId, decision }` | User xác nhận/cancel action nhạy cảm |
+
+Không có `tool.confirmation` — tool execution hoàn toàn server-side.
 
 ### 5.3 Message server gửi về FE
 
@@ -285,12 +288,11 @@ Không cần JSON, không base64. Server đọc byte 0, switch, xử lý phần 
 | --- | --- | --- |
 | `session.ready` | `{ userId, locale, screenMaxBytes }` | Server đã mở Gemini Live session, kèm thông tin xác thực |
 | `audio` | **Binary frame** `0x01` + raw PCM 24kHz | Dùng header `0x01` như FE→BE, FE đọc `ArrayBuffer` và đưa vào `AudioStreamer.addPCM16()` |
-| `transcript` | `{ source: "user" | "model", text, final }` | Hiển thị phụ đề/log |
-| `agent-status` | `StatusUpdate` | Cho UI biết agent đang làm gì |
-| `thought` | `ThoughtStep` | Debug/trace, có thể ẩn với user thường |
-| `tool-call` | `{ id, name, args, agentId, status }` | Logger/debug |
-| `tool-result` | `{ id, name, result, status }` | Logger/debug |
-| `frontend-action` | `FrontendAction` | Navigate, open map, display list, confirm dialog |
+| `transcript` | `{ source: "user" \| "model", text, final }` | Hiển thị phụ đề/log |
+| `status` | `StatusUpdate` | Cho UI biết agent đang làm gì |
+| `frontend-action` | `FrontendAction[]` | Navigate, open map, display list, confirm dialog — do server gửi sau khi execute tool |
+| `tool-call` | `FunctionCall[]` | (Debug) tool call từ Gemini |
+| `tool-result` | `{ name, result }` | (Debug) kết quả tool |
 | `error` | `{ code, message, recoverable }` | Lỗi có thể retry hoặc phải đóng session |
 | `session.closed` | `{ reason }` | Cleanup FE |
 
@@ -360,81 +362,135 @@ Lưu ý kỹ thuật từ `@google/genai`:
 
 ### Phase 2: FE chuyển từ direct Gemini sang server bridge
 
-Refactor `Easyconf-FE-Client/src/app/[locale]/chatbot/livechat`:
+Refactor `Easyconf-FE-Client/src/app/[locale]/chatbot/livechat`.
 
-| Hiện tại | Sau refactor |
-| --- | --- |
-| `useLiveApi.ts` tạo `new GoogleGenAI({ apiKey })` | `useLiveAgentSocket.ts` kết nối WebSocket server |
-| FE gọi `session.sendRealtimeInput()` | FE gửi message `audio`/`video` vào WebSocket |
-| FE tự nhận Gemini SDK message | FE nhận protocol message từ server |
-| FE tự xử lý tool nghiệp vụ | FE chỉ thực thi `frontend-action` được server trả về |
+#### Chiến lược
 
-Giữ lại/tái sử dụng:
+Giữ nguyên interface `UseLiveAPIResults` để mọi consumer không cần sửa. Swap implementation bên trong.
 
-- `AudioRecorder` nhưng thêm option `echoCancellation`, `noiseSuppression`, `autoGainControl`, `channelCount: 1`.
-- `AudioStreamer` để phát audio PCM 24kHz.
-- Logger components để hiển thị transcript/tool/status.
-- UI live chat, voice selector, mic button, connection status.
+Ba mục tiêu chính:
+1. **Thay direct Gemini SDK bằng WebSocket bridge** — FE không còn giữ API key, không gọi Gemini trực tiếp.
+2. **Thêm screen sharing** — `getDisplayMedia()` + gửi JPEG frame 1 FPS qua binary frame `0x02`.
+3. **Thêm Acoustic Echo Cancellation (AEC)** — chống feedback loop khi micro thu lại giọng AI từ loa.
 
-Thêm mới:
+Quyết định thiết kế:
+- **Tool execution server-side ngay từ Phase 2** (bỏ hẳn FE tool handler). Server execute tool bằng `liveToolAdapter` (tái sử dụng handler text chatbot), gửi `frontend-action` về FE, gọi `sendToolResponse()` lên Gemini. FE chỉ nhận kết quả, không execute hay confirm tool.
+- **AEC** dùng WebRTC loopback technique: route audio output AI qua một cặp `RTCPeerConnection` local, khiến browser AEC3 (cùng engine Google Meet) nhận diện giọng AI như "remote participant audio" và tự động cancel khỏi mic input.
+
+#### Thứ tự implement
+
+| Bước | File mới/sửa | Hành động | Ý tưởng |
+|------|-------------|-----------|---------|
+| 1 | `liveProtocol.ts` | NEW | Binary frame helpers (header `0x01` audio, `0x02` video) + JSON message type cho text frame giữa FE và Server |
+| 2 | `useLiveAgentSocket.ts` | NEW | WebSocket lifecycle: connect/disconnect, send binary + JSON, nhận binary frame audio/video + JSON event từ server. Auto-reconnect. Auth bằng JWT token |
+| 3 | `useLiveApi.ts` | REFACTOR | Thay `GoogleGenAI` SDK bằng socket bridge. Giữ nguyên `on/off` event emitter. Map server JSON events (`session.ready`, `transcript`, `frontend-action`, `status`) → emitter events |
+| 4 | `useAudioRecorder.ts` | REFACTOR | Gửi binary frame `0x01` + PCM 16kHz qua socket thay vì `SDKBlob` → `sendRealtimeInput()` |
+| 5 | `LiveChatAPIConfig.tsx` | REFACTOR | Bỏ SDK config (`setConfig`, function declarations). Tool call server-side, FE chỉ nhận `frontend-action` event |
+| 6 | `LiveAPIContext.tsx` | REFACTOR | Bỏ prop `apiKey`, thay bằng `serverUrl` + `token` |
+| 7 | `useScreenShare.ts` | NEW | `getDisplayMedia()` → loop RAF 1 FPS → gửi binary frame `0x02` + JPEG |
+| 8 | `screenFrameCapture.ts` | NEW | Canvas resize frame về 768x768, nén JPEG quality 0.7 |
+| 9 | `useAudioAEC.ts` | NEW | **WebRTC loopback AEC**: route AI audio output qua RTCPeerConnection local, phát remote stream ra loa thật → browser AEC3 tự cancel khỏi mic. Gộp 2 AudioContext (recording 16kHz + playback 24kHz) thành 1 shared context. Không cần AudioWorklet — AEC do browser engine xử lý |
+| 10 | `audio-recorder.ts` | UPDATE | Thêm constraint `echoCancellation: true, noiseSuppression: true, autoGainControl: true` vào getUserMedia. AEC tự động lấy reference signal từ remote audio (pc2) đang phát ra loa để cancel, không cần merge stream thủ công |
+| 11 | `audio-streamer.ts` | UPDATE | Playback qua shared AudioContext, thêm `MediaStreamDestination` để feed reference signal vào AEC |
+| 12 | `LiveChat.tsx` | UPDATE | Wire screen share button, AEC status indicator, pass token từ auth store |
+| 13 | Server: `liveSessionManager.ts` + `liveGeminiBridge.ts` | UPDATE | Server execute tool khi nhận `toolCall` từ Gemini thay vì forward FE; thêm `liveToolAdapter` |
+
+#### AEC — WebRTC Loopback (chi tiết)
+
+Vấn đề: Browser AEC (`getUserMedia` echoCancellation) chỉ cancel audio từ WebRTC peer connection, không cancel audio phát từ Web Audio API.
+
+Giải pháp — WebRTC loopback:
+- Tạo 1 cặp `RTCPeerConnection` local (pc1 ↔ pc2) trên cùng trang.
+- AI audio output được route qua `MediaStreamDestination` → addTrack vào pc1.
+- pc2 nhận stream → coi như "remote participant audio".
+- Gắn remote stream từ pc2 vào `<audio autoplay>` để phát ra loa thật — AEC cần acoustic reference signal là audio đang phát ra loa để so sánh với mic.
+- `getUserMedia({ echoCancellation: true })` thu mic — browser AEC3 tự động lấy reference signal từ remote audio của pc2 và trừ nó khỏi tín hiệu mic, đầu ra chỉ còn giọng user.
+
+Yêu cầu hạ tầng:
+- Gộp 2 `AudioContext` riêng (hiện tại recording 16kHz + playback 24kHz) thành 1 shared context.
+- `AudioStreamer` playback qua shared context, đồng thời feed AI audio vào `MediaStreamDestination` (không cần AudioWorklet cho việc routing reference — AEC hoàn toàn do browser engine xử lý).
+- Không cần thêm thư viện — WebRTC API có sẵn trong browser.
+
+#### Tổng quan files thay đổi
+
+| File | Trạng thái | Ý tưởng thay đổi |
+|------|-----------|-----------------|
+| `useLiveApi.ts` | REFACTOR | Socket bridge thay SDK, giữ event emitter |
+| `useAudioRecorder.ts` | REFACTOR | Binary frame thay SDK blob |
+| `LiveChatAPIConfig.tsx` | REFACTOR | Bỏ SDK config, giữ toolcall routing |
+| `LiveAPIContext.tsx` | REFACTOR | `serverUrl`+`token` thay `apiKey` |
+| ~~`tool.handlers.ts`~~ | ~~Giữ nguyên~~ → **Xóa bỏ** | Server execute tool bằng `liveToolAdapter` |
+| `audio-recorder.ts` | UPDATE | AEC constraints + loopback stream |
+| `audio-streamer.ts` | UPDATE | Shared AudioContext + AEC reference |
+| `LiveChat.tsx` | UPDATE | Screen share + AEC status + token |
+
+| File mới | Ý tưởng |
+|----------|---------|
+| `liveProtocol.ts` | Binary encode/decode, JSON message types |
+| `useLiveAgentSocket.ts` | WebSocket lifecycle |
+| `useScreenShare.ts` | Display media capture loop |
+| `screenFrameCapture.ts` | Frame resize/compress |
+| `useAudioAEC.ts` | WebRTC loopback AEC setup |
+| ~~`aecWorklet.ts`~~ | **Không cần** — AEC do browser engine xử lý, không cần AudioWorklet để route reference |
+
+#### Protocol flow
 
 ```text
-livechat/hooks/useLiveAgentSocket.ts
-livechat/hooks/useScreenShare.ts
-livechat/utils/liveProtocol.ts
-livechat/utils/screenFrameCapture.ts
+Tool execution (server-side):
+  Gemini → toolCall → Server → liveToolAdapter.executeTool()
+    → handler.execute() → { modelResponseContent, frontendActions }
+    → Server → session.sendToolResponse({ functionResponses }) → Gemini
+    → Server → JSON "frontend-action" → FE (nếu có UI action)
+
+AEC flow:
+  AI Audio → AudioStreamer → MediaStreamDestination
+    → pc1.addTrack() → pc2.ontrack → remoteStream
+    → &lt;audio autoplay srcObject={remoteStream}&gt; → LOA THẬT
+    → Browser AEC3 so reference (loa) vs capture (mic)
+    → getUserMedia({echoCancellation:true}) → mic không còn echo AI
 ```
 
-Khuyến nghị media:
+### Phase 3: Tool Adapter Layer — Nâng cấp
 
-- Audio input dùng `AudioWorklet`, PCM 16-bit 16kHz mono.
-- WebSocket gửi **binary frame** với 1-byte header: `0x01` = audio PCM, `0x02` = video JPEG. Không base64. Không JSON.
-- Text frame riêng cho control message (session.start, session.stop, text, tool.confirmation).
-- Screen share dùng `getDisplayMedia`, resize frame về 768x768 hoặc 640x360 tùy UI, JPEG quality 0.6-0.7.
-- Chỉ gửi 1 FPS mặc định. Tăng lên 2-5 FPS chỉ khi có use case cần thao tác nhanh.
-- Screen context được model tự suy luận từ frame JPEG, không cần metadata riêng.
-
-### Phase 3: Tool Adapter Layer
-
-Mục tiêu: Live agent dùng lại handler/tool hiện có, không viết lại logic nghiệp vụ.
+Mục tiêu: Hoàn thiện tool adapter (đã triển khai sơ bộ ở Phase 2), thêm schemas validation, agent context injection, logging chuẩn.
 
 Thêm module:
 
 ```text
 src/live/tools/
-  liveToolRegistry.ts
-  liveToolAdapter.ts
-  liveToolSchemas.ts
-  liveFrontendActionMapper.ts
+  liveToolSchemas.ts       ← MỚI: Zod schema cho từng tool
 ```
 
-Adapter cần làm:
+Cải tiến `liveToolAdapter.ts` (đã có từ Phase 2):
 
-- Map function call từ Gemini/ADK sang handler cũ.
-- Inject context gồm `userToken`, `sessionId`, `agentId`, `language`, `screenContext`.
-- Convert kết quả handler thành function response cho Gemini.
-- Tách `messageForModel` và `frontendActions`.
-- Gửi status/thought về FE trong lúc tool chạy.
-- Bắt lỗi và trả lỗi có cấu trúc, tránh để model hallucinate rằng action đã thành công.
+- `FrontendAction` đã chuẩn (dùng chung type với text chatbot). FE live nhận `"frontend-action"` event và handle trực tiếp, không cần mapper riêng.
 
-Tool MVP:
+- Inject `userToken` từ auth context (hiện tại đang `null`).
+- Inject `screenContext` khi screen sharing hoạt động.
+- Gửi `ThoughtStep` về FE song song với execution.
+- Log tool execution vào `ChatbotFlowLoggerService`.
+- Bắt lỗi và trả lỗi có cấu trúc, tránh model hallucinate.
+
+Tool đã hoạt động ngay từ Phase 2 (qua `functionRegistry` tái sử dụng):
 
 | Tool live | Handler cũ | Agent sở hữu |
 | --- | --- | --- |
 | `retrieveKnowledge` | `RetrieveKnowledgeHandler` | `LiveConferenceAgent` |
-| `navigation` | navigation handler/action mapper | `LiveNavigationAgent` |
-| `openGoogleMap` | map action mapper | `LiveNavigationAgent` |
-| `getWebsiteInfo` | `GetWebsiteInfoHandler` hoặc website info data | `LiveWebsiteInfoAgent` |
+| `navigation` | `NavigationHandler` | `LiveNavigationAgent` |
+| `openGoogleMap` | `OpenGoogleMapHandler` | `LiveNavigationAgent` |
+| `getWebsiteInfo` | `GetWebsiteInfoHandler` | `LiveWebsiteInfoAgent` |
+| `manageFollow` | `ManageFollowHandler` | `LiveConferenceAgent` |
+| `manageCalendar` | `ManageCalendarHandler` | `LiveConferenceAgent` |
+| `manageBlacklist` | `ManageBlacklistHandler` | `LiveConferenceAgent` |
+| `sendEmailToAdmin` | `SendEmailToAdminHandler` | `LiveAdminContactAgent` |
+| (và tất cả handler còn lại) | ... | ... |
 
-Tool phase sau:
+Điều kiện để bật tool nhạy cảm:
 
-| Tool live | Điều kiện trước khi bật |
+| Tool | Điều kiện |
 | --- | --- |
-| `manageFollow` | Auth + confirmation/log ổn định |
-| `manageCalendar` | Auth + UI action display ổn định |
-| `manageBlacklist` | Auth + guard tránh action nhầm do screen ambiguous |
-| `sendEmailToAdmin` | Confirmation bằng UI và/hoặc voice rõ ràng |
-| recommendation/feedback tools | Payload display list đã chuẩn hóa |
+| `manageFollow` / `manageCalendar` / `manageBlacklist` | Auth + guard screen context rõ ràng |
+| `sendEmailToAdmin` | Confirmation qua voice hoặc UI |
 
 ### Phase 4: Live multi-agent orchestration
 
@@ -572,8 +628,10 @@ Refactor/thêm mới trong thư mục live chat, không ảnh hưởng regular t
 ```text
 src/app/[locale]/chatbot/livechat/hooks/useLiveAgentSocket.ts
 src/app/[locale]/chatbot/livechat/hooks/useScreenShare.ts
-src/app/[locale]/chatbot/livechat/utils/liveProtocol.ts
-src/app/[locale]/chatbot/livechat/utils/screenFrameCapture.ts
+src/app/[locale]/chatbot/livechat/hooks/useAudioAEC.ts
+src/app/[locale]/chatbot/livechat/lib/liveProtocol.ts
+src/app/[locale]/chatbot/livechat/lib/screenFrameCapture.ts
+src/app/[locale]/chatbot/livechat/lib/aecWorklet.ts
 ```
 
 Điều chỉnh trong live chat:
@@ -581,7 +639,7 @@ src/app/[locale]/chatbot/livechat/utils/screenFrameCapture.ts
 - `useLiveApi.ts` không còn gọi `GoogleGenAI` trực tiếp trong production.
 - `AudioRecorder` gửi audio tới socket bridge.
 - `AudioStreamer` nhận audio từ server và phát.
-- `tool.handlers.ts` giảm vai trò, chỉ giữ UI action local nếu thật sự cần.
+- ~~`tool.handlers.ts`~~ **Xóa bỏ** — server execute toàn bộ tool. FE chỉ nhận `frontend-action` event.
 - Live UI thêm nút share screen, trạng thái “đang chia sẻ”, “đang nghe”, “agent đang xử lý”.
 - Hiển thị transcript user/model để người dùng kiểm tra chatbot nghe đúng chưa.
 - Giữ nguyên `/chatbot/regularchat`, các store/hook regular chat và Socket.IO text flow hiện tại.
@@ -707,18 +765,44 @@ Không tự ý follow, thêm calendar, blacklist hoặc gửi email nếu chưa 
 
 ## 11. Thứ tự công việc đề xuất
 
+#### Phase 1 ✅ Hoàn thành
+
 1. Thêm server WebSocket `/api/live-agent` và `LiveSessionManager`.
-2. Tạo bridge `@google/genai` Live API ở server với audio/text trước, chưa tool, chạy độc lập với text chatbot.
-3. Refactor FE live chat để kết nối server bridge, bỏ direct `GoogleGenAI` production trong live chat; regular chat giữ nguyên.
-4. Thêm audio output playback từ server về FE.
-5. Thêm screen sharing frame capture và forward lên server.
-6. Thêm `liveToolRegistry` cho `retrieveKnowledge`, `navigation`, `getWebsiteInfo`.
-7. Tạo `LiveHostAgent` instruction và function declarations tối thiểu.
-8. Tích hợp status/thought/tool logs về FE.
-9. Thêm guard cho action nhạy cảm và confirmation flow.
-10. Bổ sung `manageFollow`, `manageCalendar`, `manageBlacklist`, `sendEmailToAdmin`.
-11. Thêm lưu transcript/action summary vào conversation history.
-12. Sau MVP, đưa `@google/adk` vào live runtime để định nghĩa `LlmAgent`, `RoutedAgent`, workflow testable. Text chatbot chỉ migrate nếu có kế hoạch riêng sau này.
+2. Tạo bridge `@google/genai` Live API ở server với audio/text, tool call parsing, binary audio output.
+3. `LiveConfig`, `liveAuth` (JWT), idle timeout 10 phút, frame size guard, graceful shutdown.
+
+#### Phase 2 🔜 (Hiện tại)
+
+4. Tạo `liveProtocol.ts` — binary frame helpers + JSON message types.
+5. Tạo `useLiveAgentSocket.ts` — WebSocket lifecycle hook.
+6. Refactor `useLiveApi.ts` — swap SDK → socket bridge, giữ event emitter.
+7. Refactor `useAudioRecorder.ts` — binary frame `0x01` thay SDK blob.
+8. Refactor `LiveChatAPIConfig.tsx` — bỏ SDK config, tool call qua bridge.
+9. Refactor `LiveAPIContext.tsx` — `serverUrl`+`token` thay `apiKey`.
+10. Tạo `useScreenShare.ts` + `screenFrameCapture.ts` — screen sharing.
+11. **Tạo `useAudioAEC.ts` — WebRTC loopback AEC (không cần AudioWorklet, AEC do browser engine xử lý).**
+12. **Update `audio-recorder.ts` + `audio-streamer.ts` — shared AudioContext, phát AI audio ra loa thật, AEC constraints.**
+13. Update `LiveChat.tsx` — wire screen share + AEC status + token.
+14. Server: thêm `src/live/tools/liveToolAdapter.ts` — server execute tool thay vì forward FE.
+
+#### Phase 3
+
+13. Cải tiến `liveToolAdapter` — inject `userToken`, `screenContext`, logging.
+14. Thêm `liveToolSchemas` — Zod schema validation cho từng tool.
+15. Thêm `liveFrontendActionMapper` — map `FrontendAction` thành event FE chuẩn.
+
+#### Phase 4
+
+16. Tạo `LiveHostAgent` instruction và function declarations tối thiểu.
+17. Thêm guard cho action nhạy cảm và confirmation flow.
+18. Bổ sung `manageFollow`, `manageCalendar`, `manageBlacklist`, `sendEmailToAdmin`.
+
+#### Phase 5+
+
+19. Screen context và grounding (`LiveScreenState`).
+20. Lưu transcript/action summary vào conversation history.
+21. Tracking / recommendation integration.
+22. ADK migration (`@google/adk` — `LlmAgent`, `RoutedAgent`, workflow testable).
 
 ## 12. Tiêu chí hoàn thành MVP
 
