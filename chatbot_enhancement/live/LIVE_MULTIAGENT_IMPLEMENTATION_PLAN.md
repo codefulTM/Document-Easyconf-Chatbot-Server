@@ -124,8 +124,8 @@ Repo `Easyconf-FE-Client` đã có thư mục `src/app/[locale]/chatbot/livechat
 | Tool Adapter (`src/live/tools/liveToolAdapter.ts`) | ✅ **Đã merge vào Phase 2** | Server execute tool trực tiếp, không forward FE |
 | Multi-Agent Orchestration | ❌ **Chưa có** | Greenfield. Phase 4 của plan |
 | ADK Integration | ❌ **Chưa có** | Greenfield. Phase 4 mức B |
-| Database / History | ❌ **Chưa có** | Phase 6 |
-| Tracking / Recommendation | ❌ **Chưa có** | Phase 7 |
+| Database / History | ⏸️ **Tạm hoãn** | Phase 6 (deferred) |
+| Tracking / Recommendation | 🗑️ **Đã loại bỏ** | Không nằm trong plan |
 
 ### 2.4 Live bridge trong `REPORT.md`
 
@@ -529,27 +529,11 @@ Lưu ý khi dùng ADK:
 - `RoutedAgent` phù hợp chọn đúng một agent tại runtime và có fallback nếu agent lỗi trước khi emit event.
 - Tool schema nên dùng Zod để type-safe và dễ validate.
 
-### Phase 5: Screen context và grounding
+### (Đã lược bỏ) Phase 5: Screen context và grounding
 
-Mục tiêu: biến màn hình thành context an toàn, không chỉ là ảnh thô.
+~Đã lược bỏ — Gemini Live xử lý screen context tự nhiên qua frame ảnh. Không cần `LiveScreenState` riêng.~
 
-Server giữ `LiveScreenState`:
-
-| Field | Ý nghĩa |
-| --- | --- |
-| `lastFrameAt` | Thời điểm nhận frame gần nhất |
-| `lastPageUrl` | URL/route hiện tại |
-| `lastScreenSummary` | Tóm tắt màn hình gần nhất do model/agent tạo |
-| `visibleEntities` | Hội nghị/journal/button/card được nhận diện nếu có |
-| `confidence` | Độ chắc chắn khi map “cái này”, “hội nghị đầu tiên” |
-
-Guard bắt buộc:
-
-- Nếu user nói “follow hội nghị này” nhưng screen context không xác định được hội nghị với confidence cao, agent phải hỏi lại.
-- Với action ghi dữ liệu như follow/calendar/blacklist/email, không được chỉ dựa vào ảnh mờ.
-- Với navigation/open map có thể cho phép tự động nếu URL/location rõ ràng.
-
-### Phase 6: Conversation history và memory
+### ⏸️ Phase 6: Conversation history và memory (tạm hoãn)
 
 Live session cần lưu cả text transcript và action summary, không lưu raw audio/video mặc định.
 
@@ -573,14 +557,9 @@ Nếu cần debug media:
 - Chỉ bật bằng env `LIVE_AGENT_DEBUG_MEDIA=true` ở môi trường dev.
 - Có TTL ngắn và cảnh báo rõ.
 
-### Phase 7: Tracking và recommendation
+### (Đã lược bỏ) Phase 7: Tracking và recommendation
 
-Tích hợp với `Easyconf-Tracking-System` sau MVP:
-
-- Log event `LIVE_SESSION_START`, `LIVE_SESSION_END`.
-- Log intent/action như `LIVE_VOICE_SEARCH_CONFERENCE`, `LIVE_NAVIGATION_ACTION`, `LIVE_FOLLOW_ACTION_CONFIRMED`.
-- Không gửi raw transcript nhạy cảm sang tracking nếu không cần.
-- Với recommendation, tận dụng behavior hiện có như follow, add calendar, click detail.
+~Đã lược bỏ — không cần thiết cho MVP. Tracking/recommendation đã có sẵn qua text chatbot.~
 
 ## 7. Thay đổi cụ thể theo repo
 
@@ -602,7 +581,6 @@ src/live/liveAuth.ts
 src/live/liveAgentOrchestrator.ts
 src/live/tools/liveToolRegistry.ts
 src/live/tools/liveToolAdapter.ts
-src/live/screen/liveScreenState.ts
 ```
 
 Tích hợp vào bootstrap:
@@ -670,13 +648,7 @@ Có thể thêm sau:
 
 ### 7.5 `Easyconf-Tracking-System`
 
-Không nằm trong MVP.
-
-Sau khi live ổn định:
-
-- Thêm event schema cho voice/screen actions.
-- Không lưu raw audio/screen.
-- Chỉ lưu metadata/action đã được user thực hiện.
+~Tracking/recommendation tích hợp đã được lược bỏ khỏi plan. Text chatbot tracking hiện tại không bị ảnh hưởng.~
 
 ## 8. Prompt và instruction cho LiveHostAgent
 
@@ -797,12 +769,9 @@ Không tự ý follow, thêm calendar, blacklist hoặc gửi email nếu chưa 
 17. Thêm guard cho action nhạy cảm và confirmation flow.
 18. Bổ sung `manageFollow`, `manageCalendar`, `manageBlacklist`, `sendEmailToAdmin`.
 
-#### Phase 5+
+#### Phase 5+ (future — chưa có kế hoạch cụ thể)
 
-19. Screen context và grounding (`LiveScreenState`).
-20. Lưu transcript/action summary vào conversation history.
-21. Tracking / recommendation integration.
-22. ADK migration (`@google/adk` — `LlmAgent`, `RoutedAgent`, workflow testable).
+19. ADK migration (`@google/adk` — `LlmAgent`, `RoutedAgent`, workflow testable).
 
 ## 12. Tiêu chí hoàn thành MVP
 
