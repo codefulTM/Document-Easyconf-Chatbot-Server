@@ -1,12 +1,17 @@
 # Chung
 
-1. Thêm vào DB bảng phụ nhiều nhiều liên kết giữa conference id và user id. Có thêm một cột nữa là thứ tự của conference id xuất hiện trong recommend_user:... trong Redis. Sau đó, trong hàm retrieveKnowledge, thực hiện query trên bảng này để filter hội nghị luôn thay vì dùng API trên BE.
+- Note: Hùng làm 2, 3; TMinh làm 4.
+
+<!-- 1. Thêm vào DB bảng phụ nhiều nhiều liên kết giữa conference id và user id. Có thêm một cột nữa là thứ tự của conference id xuất hiện trong recommend_user:... trong Redis. Sau đó, trong hàm retrieveKnowledge, thực hiện query trên bảng này để filter hội nghị luôn thay vì dùng API trên BE.(Tạm thời bỏ qua do hong biết có cần hong) -->
+
 2. Handler showMoreRecommendations đang bị lặp code trong retrieveKnowledge. -> sửa.
-3. Khi chạy file main_job.py để cập nhật dữ liệu trên Redis thì đồng thời thay đổi dữ liệu trên bảng phụ nhiều nhiều.
-4. Check lại xem có truncate response của host agent / sub agent không. -> Chỉ được yêu cầu chatbot trả về độ dài x kí tự, KHÔNG ĐƯỢC TỰ Ý cắt bỏ string. Người dùng thà thấy một response dài(trường hợp LLM không tuân theo prompt) còn hơn thấy một response bị cắt ngang giữa chừng.
-5. Kiểm tra lại những chỗ gọi lưu result set cho các conference list trong code. -> Không được gọi thẳng trong code mà phải để AI gọi.
+<!-- 3. Khi chạy file main_job.py để cập nhật dữ liệu trên Redis thì đồng thời thay đổi dữ liệu trên bảng phụ nhiều nhiều.(Tạm thời bỏ qua do hong biết có cần hong) -->
+3. Check lại xem có truncate response của host agent / sub agent không. -> Chỉ được yêu cầu chatbot trả về độ dài x kí tự, KHÔNG ĐƯỢC TỰ Ý cắt bỏ string. Người dùng thà thấy một response dài(trường hợp LLM không tuân theo prompt) còn hơn thấy một response bị cắt ngang giữa chừng.
+4. Kiểm tra lại những chỗ gọi lưu result set cho các conference list trong code. -> Không được gọi thẳng trong code mà phải để AI gọi.
 
 # retrieveKnowledge.handler.ts
+
+- Note: Hùng làm 1, 2, 3, 4. TMinh làm 5, 6, 7
 
 1. Tạm thời comment bước Áp dụng filter vị trí suy luận từ query.
 
@@ -78,7 +83,7 @@
 
    → **Nên đơn giản hóa**: Chỉ tin vào `explicitListMode` từ model, bỏ hết heuristic.
 
-3. effectiveFilter = this.applyInferredLocationFilter(query, effectiveFilter); -> Check coi apply đống filter này vào thì bên retrieve() đã thêm phần xử lý mấy filter này chưa?
+3. effectiveFilter = this.applyInferredLocationFilter(query, effectiveFilter); -> Check coi apply đống filter này vào thì bên retrieve() đã thêm phần xử lý mấy filter này chưa? Nếu chưa thì thêm vào. filter nằm trong cả keyword search và vector search.
 4. `executeRecommendAndReturnIds()` vs `executeGetRecommendationsForUser()` — có thể gộp.
 
    Cả hai đều gọi `callRecommendationsForYou()` bên trong. `executeGetRecommendationsForUser` đã có sẵn `page` và `perPage` params, nên hoàn toàn có thể dùng trong loop pagination.
@@ -144,10 +149,14 @@
 
 # english.ts
 
+- Note: File này thì lúc Hùng + TMinh fix xong tất cả các lỗi trên thì mới sửa.
+
 - Sửa lại prompt để cứ mỗi lần filter muốn filter theo thông tin gì đó thì -> include trường đó trong conferenceFields để LLM bắt buộc phải đọc lại những kết quả mình đã lọc và verify lại cho người dùng -> kết hợp cả tầng code và tầng LLM để lọc -> tăng độ chính xác. cái thứ hai là phải thêm vào support cho trường continent trong filter, do hiện tại truyền vào hàm thì có truyền mà thân hàm ignore cũng như không.
 - Còn lại coi thêm trong english.ts.patch.report.md và english.ts.patch
 
 # Idea: hostAgent.streaming.handler.ts
+
+- Note: File này thì lúc Hùng + TMinh fix xong tất cả các lỗi trên thì mới sửa.
 
 - Khi subagent yêu cầu hàm retrieveKnowledge với params truyền vào là listMode = true -> đặt cờ shouldSaveResultSet = true
 - Khi LLM muốn kết thúc workflow -> chạy code để check xem cờ shouldSaveResultSet có bật không. Nếu bật thì check coi trong các turn của LLM có gọi hàm saveResultSet lần nào hay chưa. Nếu chưa thì gửi thêm một turn nữa cho chatbot yêu cầu nó gọi hàm saveResultSet. Lặp lại đến khi nào hàm saveResultSet được gọi rồi mới thôi.

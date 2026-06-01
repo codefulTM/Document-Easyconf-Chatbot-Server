@@ -253,12 +253,16 @@ Lý do không nên thay toàn bộ text chatbot bằng ADK:
 ws(s)://<chatbot-server>/api/live-agent
 ```
 
-Query/header cần có:
+**Auth:** Không dùng query param hay header. Dùng auth message (method #4) để tránh token bị lộ trong lịch sử web, server logs:
+
+1. Client mở WebSocket — không kèm auth token.
+2. Server gửi `{ type: "session.auth_required" }`.
+3. Client gửi `{ type: "auth", payload: { token: "<JWT>", locale?: "vi" } }`.
+4. Server verify JWT, nếu OK → gửi `session.ready`, nếu sai → đóng kết nối.
+5. Auth timeout 30 giây — client không gửi auth kịp sẽ bị đóng.
 
 | Trường | Mục đích |
 | --- | --- |
-| `Authorization: Bearer <token>` | Xác thực user nếu có |
-| `locale` | Ngôn ngữ phản hồi, mặc định `vi` |
 | `mode=voice-screen` | Phân biệt live mode với text mode |
 
 ### 5.2 Message FE gửi lên server
@@ -272,10 +276,13 @@ Query/header cần có:
 
 Không cần JSON, không base64. Server đọc byte 0, switch, xử lý phần còn lại.
 
+**Thứ tự gửi:** Client phải gửi `auth` message trước. Binary frame (audio/video) chỉ được gửi sau khi nhận được `session.ready` từ server. Mọi binary frame trước khi auth sẽ bị server bỏ qua.
+
 **Text frame** (dùng cho control message, vài lần trong cả session):
 
 | Type | Payload | Ghi chú |
 | --- | --- | --- |
+| `auth` | `{ token, locale? }` | Xác thực sau connect (method #4) |
 | `session.start` | `{ locale, model, voice, responseModalities }` | Khởi tạo Live session |
 | `session.stop` | `{ reason? }` | Kết thúc chủ động |
 | `text` | `{ text }` | Fallback text hoặc debug |
@@ -286,6 +293,7 @@ Không có `tool.confirmation` — tool execution hoàn toàn server-side.
 
 | Type | Payload | Ghi chú |
 | --- | --- | --- |
+| `session.auth_required` | `{}` | Server yêu cầu client gửi auth message |
 | `session.ready` | `{ userId, locale, screenMaxBytes }` | Server đã mở Gemini Live session, kèm thông tin xác thực |
 | `audio` | **Binary frame** `0x01` + raw PCM 24kHz | Dùng header `0x01` như FE→BE, FE đọc `ArrayBuffer` và đưa vào `AudioStreamer.addPCM16()` |
 | `transcript` | `{ source: "user" \| "model", text, final }` | Hiển thị phụ đề/log |
@@ -332,7 +340,7 @@ src/live/
 Nhiệm vụ:
 
 - Tạo WebSocket endpoint `/api/live-agent`.
-- Validate auth token bằng `validateLiveAuth()` → `{ userId, locale }`.
+- Xác thực bằng auth message (method #4): gửi `session.auth_required`, nhận `{ type: "auth", payload: { token } }`, verify JWT → `{ userId, locale }`.
 - Khởi tạo `GoogleGenAI` từ server env, không nhận API key từ FE.
 - Mở `ai.live.connect({ model, config, callbacks })`.
 - Forward audio/video/text từ FE vào `session.sendRealtimeInput()`.
@@ -381,9 +389,9 @@ Quyết định thiết kế:
 
 | Bước | File mới/sửa | Hành động | Ý tưởng |
 |------|-------------|-----------|---------|
-| 1 | `liveProtocol.ts` | NEW | Binary frame helpers (header `0x01` audio, `0x02` video) + JSON message type cho text frame giữa FE và Server |
-| 2 | `useLiveAgentSocket.ts` | NEW | WebSocket lifecycle: connect/disconnect, send binary + JSON, nhận binary frame audio/video + JSON event từ server. Auto-reconnect. Auth bằng JWT token |
-| 3 | `useLiveApi.ts` | REFACTOR | Thay `GoogleGenAI` SDK bằng socket bridge. Giữ nguyên `on/off` event emitter. Map server JSON events (`session.ready`, `transcript`, `frontend-action`, `status`) → emitter events |
+| 1 | `liveProtocol.ts` | NEW | Binary frame helpers (header `0x01` audio, `0x02` video) + JSON message type cho text frame giữa FE và Server. Thêm `LiveAuthPayload`, `"auth"` message type, `"session.auth_required"` server event |
+| 2 | `useLiveAgentSocket.ts` | NEW | WebSocket lifecycle: connect/disconnect, send binary + JSON, nhận binary frame audio/video + JSON event từ server. Auto-reconnect. Auth bằng auth message (method #4) — gửi `{ type: "auth", payload: { token, locale } }` ngay sau `onopen`, không đặt token vào URL query param |
+| 3 | `useLiveApi.ts` | REFACTOR | Thay `GoogleGenAI` SDK bằng socket bridge. Giữ nguyên `on/off` event emitter. Map server JSON events (`session.auth_required`, `session.ready`, `transcript`, `frontend-action`, `status`) → emitter events. Bỏ `session.start` (không còn cần thiết vì model/voice/server-configured) |
 | 4 | `useAudioRecorder.ts` | REFACTOR | Gửi binary frame `0x01` + PCM 16kHz qua socket thay vì `SDKBlob` → `sendRealtimeInput()` |
 | 5 | `LiveChatAPIConfig.tsx` | REFACTOR | Bỏ SDK config (`setConfig`, function declarations). Tool call server-side, FE chỉ nhận `frontend-action` event |
 | 6 | `LiveAPIContext.tsx` | REFACTOR | Bỏ prop `apiKey`, thay bằng `serverUrl` + `token` |
@@ -436,6 +444,13 @@ Yêu cầu hạ tầng:
 #### Protocol flow
 
 ```text
+Auth flow (method #4):
+  Client connect → Server gửi session.auth_required
+                  → Client gửi { type: "auth", payload: { token, locale? } }
+                  → Server verify JWT → tạo Gemini bridge → session.ready
+                  → Bắt đầu trao đổi audio/video/text
+                  → Auth timeout 30s nếu client không gửi auth
+
 Tool execution (server-side):
   Gemini → toolCall → Server → liveToolAdapter.executeTool()
     → handler.execute() → { modelResponseContent, frontendActions }
