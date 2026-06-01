@@ -158,5 +158,5 @@
 
 - Note: File này thì lúc Hùng + TMinh fix xong tất cả các lỗi trên thì mới sửa.
 
-- Khi subagent yêu cầu hàm retrieveKnowledge với params truyền vào là listMode = true -> đặt cờ shouldSaveResultSet = true
+- Khi subagent yêu cầu hàm retrieveKnowledge với params truyền vào là listMode = true -> đặt cờ shouldSaveResultSet = true.
 - Khi LLM muốn kết thúc workflow -> chạy code để check xem cờ shouldSaveResultSet có bật không. Nếu bật thì check coi trong các turn của LLM có gọi hàm saveResultSet lần nào hay chưa. Nếu chưa thì gửi thêm một turn nữa cho chatbot yêu cầu nó gọi hàm saveResultSet. Lặp lại đến khi nào hàm saveResultSet được gọi rồi mới thôi.
