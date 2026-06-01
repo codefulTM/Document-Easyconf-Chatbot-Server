@@ -151,6 +151,10 @@ Các format nên giữ:
 | Transport Server -> FE | Audio: **binary frame `0x01`** (raw PCM 24kHz, không base64). Transcript/tool/status: JSON text frame |
 | Transport Server -> Gemini | `session.sendRealtimeInput({ audio/video/text })` |
 
+> **⚠️ Lưu ý convert Int16 ↔ Float32:** Dù trên đường truyền (WebSocket) cả audio input và output đều là PCM 16-bit, nhưng Web Audio API trong browser chỉ làm việc với `Float32Array` range [-1, 1]. Do đó:
+> - **FE thu mic → server**: `AudioRecorder` lấy `Float32` từ Web Audio API → **convert ra Int16** (× 32768) rồi gửi binary frame `0x01`
+> - **Server → FE phát loa**: `AudioStreamer.addPCM16()` nhận `Int16` từ server → **convert về `Float32`** (÷ 32768) trước khi đưa vào `AudioBufferSourceNode`
+
 ## 3. Kiến trúc đề xuất
 
 ### 3.1 Tổng quan
@@ -295,7 +299,7 @@ Không có `tool.confirmation` — tool execution hoàn toàn server-side.
 | --- | --- | --- |
 | `session.auth_required` | `{}` | Server yêu cầu client gửi auth message |
 | `session.ready` | `{ userId, locale, screenMaxBytes }` | Server đã mở Gemini Live session, kèm thông tin xác thực |
-| `audio` | **Binary frame** `0x01` + raw PCM 24kHz | Dùng header `0x01` như FE→BE, FE đọc `ArrayBuffer` và đưa vào `AudioStreamer.addPCM16()` |
+| `audio` | **Binary frame** `0x01` + raw PCM 24kHz | Dùng header `0x01` như FE→BE, FE đọc `ArrayBuffer` và đưa vào `AudioStreamer.addPCM16()` (bên trong tự động convert Int16 → Float32 trước khi phát) |
 | `transcript` | `{ source: "user" \| "model", text, final }` | Hiển thị phụ đề/log |
 | `status` | `StatusUpdate` | Cho UI biết agent đang làm gì |
 | `frontend-action` | `FrontendAction[]` | Navigate, open map, display list, confirm dialog — do server gửi sau khi execute tool |
@@ -408,11 +412,15 @@ Quyết định thiết kế:
 Vấn đề: Browser AEC (`getUserMedia` echoCancellation) chỉ cancel audio từ WebRTC peer connection, không cancel audio phát từ Web Audio API.
 
 Giải pháp — WebRTC loopback:
+
+> **Tại sao không dùng thẳng Web Audio API + AEC?**
+> AEC3 là module của thư viện WebRTC trong Chromium (`libwebrtc`), nó sống trong **WebRTC audio pipeline**, không phải Web Audio API pipeline. Khi audio phát qua `AudioBufferSourceNode → gainNode → context.destination` (Web Audio API thuần), AEC3 không có quyền truy cập vào đường ống này để lấy reference signal. Nó chỉ thấy được audio đi qua WebRTC renderer (pc2 → `<audio>`). Vì vậy bắt buộc phải route AI audio qua WebRTC peer connection dù cả 2 peer đều trên cùng máy.
+
 - Tạo 1 cặp `RTCPeerConnection` local (pc1 ↔ pc2) trên cùng trang.
 - AI audio output được route qua `MediaStreamDestination` → addTrack vào pc1.
-- pc2 nhận stream → coi như "remote participant audio".
-- Gắn remote stream từ pc2 vào `<audio autoplay>` để phát ra loa thật — AEC cần acoustic reference signal là audio đang phát ra loa để so sánh với mic.
-- `getUserMedia({ echoCancellation: true })` thu mic — browser AEC3 tự động lấy reference signal từ remote audio của pc2 và trừ nó khỏi tín hiệu mic, đầu ra chỉ còn giọng user.
+- pc2 nhận stream → coi như "remote participant audio" trong WebRTC pipeline.
+- Gắn remote stream từ pc2 vào `<audio autoplay>` để phát ra loa thật — AEC3 lấy reference signal từ WebRTC mixer này.
+- `getUserMedia({ echoCancellation: true })` thu mic — browser AEC3 lấy reference từ pc2 (vì nó đi qua WebRTC renderer) và trừ khỏi tín hiệu mic, đầu ra chỉ còn giọng user.
 
 Yêu cầu hạ tầng:
 - Gộp 2 `AudioContext` riêng (hiện tại recording 16kHz + playback 24kHz) thành 1 shared context.
@@ -467,24 +475,20 @@ AEC flow:
 
 ### Phase 3: Tool Adapter Layer — Nâng cấp
 
-Mục tiêu: Hoàn thiện tool adapter (đã triển khai sơ bộ ở Phase 2), thêm schemas validation, agent context injection, logging chuẩn.
-
-Thêm module:
-
-```text
-src/live/tools/
-  liveToolSchemas.ts       ← MỚI: Zod schema cho từng tool
-```
+Mục tiêu: Inject `userToken` thật vào `liveToolAdapter` và thêm dispatch-level logging (orchestration trace) mà `functionRegistry.ts` đang có nhưng adapter live thiếu.
 
 Cải tiến `liveToolAdapter.ts` (đã có từ Phase 2):
 
 - `FrontendAction` đã chuẩn (dùng chung type với text chatbot). FE live nhận `"frontend-action"` event và handle trực tiếp, không cần mapper riêng.
 
-- Inject `userToken` từ auth context (hiện tại đang `null`).
-- Inject `screenContext` khi screen sharing hoạt động.
-- Gửi `ThoughtStep` về FE song song với execution.
-- Log tool execution vào `ChatbotFlowLoggerService`.
+- Inject `userToken` từ auth context (hiện tại đang `null`). Các handler như `manageFollow`, `manageCalendar` cần token thật để gọi BE API.
+- Thêm dispatch-level logging: gọi `ChatbotFlowLoggerService.startToolCall()` / `finishToolCall()` giống `functionRegistry.ts:146` để có orchestration trace (timing, cost tracking). Handler đã tự log nội bộ, nhưng adapter thiếu lớp wrap outer này.
 - Bắt lỗi và trả lỗi có cấu trúc, tránh model hallucinate.
+
+**Không làm** (đã review và loại bỏ):
+- `liveToolSchemas.ts` — redundant vì Gemini đã validate qua FunctionDeclaration, handler tự xử lý missing args và trả lỗi về model.
+- `screenContext` — không cần, Gemini Live xử lý video frame trực tiếp.
+- `ThoughtStep` — không cần cho MVP.
 
 Tool đã hoạt động ngay từ Phase 2 (qua `functionRegistry` tái sử dụng):
 
@@ -498,7 +502,15 @@ Tool đã hoạt động ngay từ Phase 2 (qua `functionRegistry` tái sử d�
 | `manageCalendar` | `ManageCalendarHandler` | `LiveConferenceAgent` |
 | `manageBlacklist` | `ManageBlacklistHandler` | `LiveConferenceAgent` |
 | `sendEmailToAdmin` | `SendEmailToAdminHandler` | `LiveAdminContactAgent` |
-| (và tất cả handler còn lại) | ... | ... |
+| `countConferenceFollowed` | `CountConferenceFollowedHandler` | `LiveConferenceAgent` |
+| `rateConference` | `RateConferenceHandler` | `LiveConferenceAgent` |
+| `getConferenceFeedback` | `GetConferenceFeedbackHandler` | `LiveConferenceAgent` |
+| `showMoreConferenceFeedback` | `ShowMoreConferenceFeedbackHandler` | `LiveConferenceAgent` |
+| `getRecommendations` | `GetRecommendationsHandler` | `LiveConferenceAgent` |
+| `getSimilarConferences` | `GetSimilarConferencesHandler` | `LiveConferenceAgent` |
+| `showMoreRecommendations` | `ShowMoreRecommendationsHandler` | `LiveConferenceAgent` |
+| `saveResultSet` | `SaveResultSetHandler` | `LiveHostAgent` |
+| `routeToAgent` | `SubAgentHandler` | `LiveHostAgent` |
 
 Điều kiện để bật tool nhạy cảm:
 
@@ -543,6 +555,82 @@ Lưu ý khi dùng ADK:
 - `ParallelAgent` phù hợp khi task độc lập, nhưng phải cẩn thận shared state/race condition.
 - `RoutedAgent` phù hợp chọn đúng một agent tại runtime và có fallback nếu agent lỗi trước khi emit event.
 - Tool schema nên dùng Zod để type-safe và dễ validate.
+
+#### ADK Compatibility Analysis — Tương thích code hiện tại với ADK-js
+
+Phân tích chi tiết những gì reuse được / không reuse được khi migrate từ `liveToolAdapter` + `english.ts` sang `@google/adk`.
+
+#### 1. Tool schema (`english.ts`)
+
+| Code hiện tại | ADK-js format | Tương thích? |
+|---|---|---|
+| `FunctionDeclaration` (từ `@google/genai`) | `FunctionTool` class | ❌ **Không** — ADK không nhận `FunctionDeclaration` object. Phải extract `.name`, `.description`, `.parameters` |
+| `.parameters: Schema` (objects, strings, enums...) | `FunctionTool({ parameters })` | ✅ **Có** — ADK chấp nhận `Schema` từ `@google/genai` trực tiếp làm `ToolInputParameters`. Không cần Zod nếu không muốn |
+| `.parameters` dùng Zod | `FunctionTool({ parameters: z.object(...) })` | ✅ Có — ADK hỗ trợ cả Zod v3 và v4 |
+| `.description` string | `FunctionTool({ description })` | ✅ Copy y nguyên |
+| `.name` string | `FunctionTool({ name })` | ✅ Copy y nguyên |
+
+Ví dụ adapter cho schema:
+```ts
+// Hiện tại: FunctionDeclaration
+export const englishRetrieveKnowledgeDeclaration: FunctionDeclaration = {
+  name: "retrieveKnowledge",
+  description: "Retrieves relevant information...",
+  parameters: { type: Type.OBJECT, properties: {...}, required: [...] },
+};
+
+// ADK: dùng thẳng .parameters (Schema)
+const retrieveKnowledgeTool = new FunctionTool({
+  name: englishRetrieveKnowledgeDeclaration.name,
+  description: englishRetrieveKnowledgeDeclaration.description,
+  parameters: englishRetrieveKnowledgeDeclaration.parameters!,  // ✅ reuse Schema
+  execute: async (args) => { ... },
+});
+```
+
+#### 2. Tool execution (handler + `liveToolAdapter.ts`)
+
+| Code hiện tại | ADK-js format | Tương thích? |
+|---|---|---|
+| `handler.execute(input: FunctionHandlerInput)` | `FunctionTool.execute(args: Record<string, unknown>)` | ⚠️ **Cần wrap** — ADK execute nhận `{args, toolContext}`, không phải `FunctionHandlerInput` |
+| `liveToolAdapter.executeTool(name, args, context)` | Trực tiếp | ✅ Có thể gọi bên trong `FunctionTool.execute()` |
+| `stubSocket` + `onStatusUpdate` | `toolContext` (ADK Context) | ⚠️ Cần adapter — ADK context khác stub socket hiện tại |
+
+Ví dụ wrapper:
+```ts
+const adaptedTool = new FunctionTool({
+  name: "retrieveKnowledge",
+  description: englishRetrieveKnowledgeDeclaration.description,
+  parameters: englishRetrieveKnowledgeDeclaration.parameters!,
+  execute: async (args, toolContext) => {
+    // Gọi lại liveToolAdapter hoặc handler trực tiếp
+    const result = await executeTool("retrieveKnowledge", args, {
+      userId: toolContext.session.userId,
+      userToken: toolContext.session.userToken,
+      locale: toolContext.session.locale,
+      sessionId: toolContext.session.id,
+    });
+    return result.modelResponseContent;
+  },
+});
+```
+
+#### 3. Agent orchestration
+
+| Code hiện tại | ADK-js format | Tương thích? |
+|---|---|---|
+| HostAgent tự xây (system prompt + function calls) | `LlmAgent` | ✅ Có thể thay thế 1:1 |
+| `routeToAgent` (function call routing) | `RoutedAgent` hoặc `LlmAgent` + agent delegation | ✅ Có thể thay bằng cơ chế routing của ADK |
+| `saveResultSet` / `conferenceRef` (state management) | ADK Context / Session state | ⚠️ Cần migrate state logic sang ADK context |
+| sequential/parallel execution | `SequentialAgent` / `ParallelAgent` | ✅ ADK hỗ trợ native |
+
+#### 4. Hướng dẫn migrate tool (từng bước)
+
+1. **Giữ nguyên** `english.ts` — không xóa, không sửa. Text chatbot cần nó.
+2. **Tạo ADK tool map** — file mới `src/live/adk/adkToolRegistry.ts`, map tool name → `FunctionTool` instance, tái sử dụng `.name`, `.description`, `.parameters` từ `english.ts`.
+3. **Wrap execution** — mỗi `FunctionTool.execute()` gọi `liveToolAdapter.executeTool()` hoặc handler trực tiếp.
+4. **Register vào ADK agent** — thay vì truyền `functionDeclarations` vào Gemini, truyền `tools: [adkToolRegistry.retrieveKnowledge, ...]` vào `LlmAgent`.
+5. **Test song song** — chạy song song với live bridge cũ cho đến khi ADK flow ổn định.
 
 ### (Đã lược bỏ) Phase 5: Screen context và grounding
 
@@ -774,9 +862,8 @@ Không tự ý follow, thêm calendar, blacklist hoặc gửi email nếu chưa 
 
 #### Phase 3
 
-13. Cải tiến `liveToolAdapter` — inject `userToken`, `screenContext`, logging.
-14. Thêm `liveToolSchemas` — Zod schema validation cho từng tool.
-15. Thêm `liveFrontendActionMapper` — map `FrontendAction` thành event FE chuẩn.
+13. Cải tiến `liveToolAdapter` — inject `userToken` thật, thêm dispatch-level logging (`startToolCall`/`finishToolCall`).
+14. _(Đã lược bỏ — Zod schema, screenContext, ThoughtStep, FrontendActionMapper không cần thiết)_
 
 #### Phase 4
 
