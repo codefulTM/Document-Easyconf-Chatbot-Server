@@ -31,48 +31,75 @@ Nguyên tắc quan trọng:
 
 ## 1. Kiến trúc tổng thể đề xuất
 
-```text
-Easyconf-FE-Client
-  ├─ Microphone capture: PCM 16kHz mono
-  ├─ Screen capture: JPEG frame
-  └─ Audio playback: PCM output từ Live API
-        │
-        │ WebSocket /api/live-agent
-        ▼
-Easyconf-Chatbot-Server Node.js
-  ├─ Live WebSocket Gateway
-  ├─ Auth/JWT/session ownership
-  ├─ Media bridge FE ↔ ADK Python service
-  ├─ Tool proxy/adapter tới handler hiện tại
-  └─ FrontendAction dispatcher
-        │
-        │ WebSocket/gRPC/HTTP internal channel
-        ▼
-ADK Python Live Agent Service
-  ├─ google-adk Agent runtime
-  ├─ Gemini Live model: gemini-live-2.5-flash-native-audio
-  ├─ LiveHostAgent
-  ├─ LiveConferenceAgent
-  ├─ LiveNavigationAgent
-  ├─ LiveWebsiteInfoAgent
-  └─ LiveAdminContactAgent
-        │
-        │ tool call proxy
-        ▼
-Existing Easyconf services
-  ├─ RAG / conference knowledge retrieval
-  ├─ Follow / calendar / blacklist
-  ├─ Feedback / recommendation
-  ├─ Navigation frontend action
-  └─ Admin email
+```mermaid
+flowchart TB
+    subgraph FE["Easyconf FE Client"]
+        MIC["getUserMedia\nmic capture"]
+        SCREEN["getDisplayMedia\nscreen capture"]
+        WSFE["1 WebSocket /api/live-agent\nPCM16 + JPEG + JSON"]
+        PCM_IN["PCM output from server\nAudioWorklet input"]
+        PC1["pc1\nlocal WebRTC"]
+        PC2["pc2\nlocal WebRTC"]
+        SPEAKER["speakers"]
+        MIC --> WSFE
+        SCREEN --> WSFE
+        WSFE --> PCM_IN --> PC1 --> PC2 --> SPEAKER
+    end
+
+    WSFE <--> WSG["Node.js Live WebSocket Gateway"]
+
+    subgraph NODE["Node.js Chatbot Server"]
+        WSG
+        AUTH["Auth / JWT / session ownership"]
+        MEDIA["Media bridge"]
+        IPC["IPC stdin/stdout\ntool calls"]
+        FA["FrontendAction dispatcher"]
+        TOOL["liveToolAdapter / FunctionRegistry"]
+    end
+
+    subgraph PY["ADK Python Live Agent Service"]
+        ADK["google-adk Agent runtime"]
+        LIVE["Gemini Live model"]
+        HOST["LiveHostAgent"]
+        CONF["LiveConferenceAgent"]
+        NAV["LiveNavigationAgent"]
+        WEB["LiveWebsiteInfoAgent"]
+        ADMIN["LiveAdminContactAgent"]
+    end
+
+    subgraph EXISTING["Existing Easyconf Services"]
+        RAG["RAG / Knowledge retrieval"]
+        FOLLOW["Follow / Calendar / Blacklist"]
+        FEEDBACK["Feedback / Recommendation"]
+        NAVACT["Navigation / Frontend actions"]
+        EMAIL["Admin email"]
+    end
+
+    WSG --> AUTH
+    WSG --> MEDIA
+    WSG <--> FA
+    MEDIA --> IPC
+    IPC --> ADK
+    ADK --> LIVE
+    ADK --> HOST
+    HOST --> CONF
+    HOST --> NAV
+    HOST --> WEB
+    HOST --> ADMIN
+    CONF --> TOOL
+    NAV --> TOOL
+    WEB --> TOOL
+    ADMIN --> TOOL
+    TOOL --> EXISTING
+    FA --> WSG
 ```
 
-### Vì sao tách ADK Python service?
+### Vì sao phải dùng Python?
 
-Google ADK Python là toolkit Python code-first, trong khi Chatbot Server hiện tại là Node.js/TypeScript. Cách an toàn nhất là thêm một service Python riêng:
+Google ADK **chỉ có Python SDK hỗ trợ Live Agent** (`gemini-live-2.5-flash-native-audio`). TypeScript SDK (`@google/genai`) có LiveClient nhưng là API thấp, không có `Agent` abstraction với multi-agent orchestration. Bắt buộc phải thêm một service Python:
 
 - Node.js vẫn giữ gateway, auth, tool handler hiện tại.
-- Python service tập trung vào ADK multi-agent orchestration và Gemini Live.
+- Python service đảm nhận ADK multi-agent orchestration + Gemini Live.
 - Có thể rollback/tắt feature live qua env mà không ảnh hưởng regular chat.
 
 ---
@@ -143,14 +170,16 @@ Routing sub-agent do ADK runtime xử lý tự động qua tham số `agents` �
 
 ### 3.4 Tool execution strategy
 
-Không rewrite nghiệp vụ trong Python ngay. Python ADK tool sẽ gọi về Node.js Chatbot Server qua internal API:
+Không rewrite nghiệp vụ trong Python ngay. Python ADK tool gọi về Node.js Chatbot Server qua IPC (stdin/stdout JSON-line protocol). Node spawns Python ADK service làm child process:
 
 ```text
 ADK Python tool call
-  -> Node internal endpoint /internal/live-tools/:toolName
-  -> existing FunctionRegistry / handler
+  -> gửi JSON message qua stdout (Python -> Node)
+  -> Node existing FunctionRegistry / handler
   -> modelResponseContent + frontendActions
-  -> Python tool result
+  -> Node dispatch frontendActions tới FE qua WebSocket (song song)
+  -> Node gửi JSON result (chỉ modelResponseContent) qua stdin (Node -> Python)
+  -> Python tool result trả về ADK
   -> Gemini Live continues response
 ```
 
@@ -158,15 +187,36 @@ Lý do:
 
 - Handler hiện tại đã có auth, logging, result set, frontend action, API call tới BE.
 - Tránh duplicate logic giữa Node và Python.
+- IPC nhanh hơn HTTP vì không cần TCP overhead, cùng process.
 - Dễ rollback vì text chatbot không bị ảnh hưởng.
 
 ---
 
-## 4. Thiết kế media live theo REPORT.md
+## 4. Thiết kế media live + AEC
+
+### Vấn đề: Loop vô tận
+
+Gemini Live nói → loa phát → mic thu lại giọng nói đó → gửi lên Gemini → Gemini trả lời tiếp → loop. Cần AEC (Acoustic Echo Cancellation) để triệt echo.
+
+### Giải pháp: pc1-pc2 WebRTC nội bộ tại FE
+
+Không cần server-side WebRTC. FE tạo 2 RTCPeerConnection local, audio Gemini đi qua pc1→pc2 trước khi ra loa, trình duyệt thấy luồng audio đó là echo reference → AEC built-in hoạt động:
+
+```text
+getUserMedia (mic)
+  -> PCM -> WebSocket -> Node -> Python -> Gemini Live
+
+Gemini Live audio output
+  -> WebSocket -> FE PCM
+  -> AudioWorklet -> MediaStreamTrack
+  -> pc1.addTrack() -> pc2 (local WebRTC)
+  -> pc2.ontrack -> <audio> -> speakers (AEC kích hoạt)
+
+Browser sees: mic input + remote audio from pc1
+Built-in AEC subtracts pc1 audio from mic signal -> NO LOOP
+```
 
 ### 4.1 Microphone input
-
-FE giữ luồng capture như `REPORT.md`:
 
 1. `navigator.mediaDevices.getUserMedia()` với:
    - `echoCancellation: true`
@@ -175,44 +225,67 @@ FE giữ luồng capture như `REPORT.md`:
    - `channelCount: 1`
 2. Web Audio API lấy PCM float.
 3. Convert `Float32Array` sang PCM 16-bit signed.
-4. Gửi WebSocket binary frame/audio chunk lên Node Gateway.
-5. Node forward sang ADK Python service.
-6. Python gửi vào Gemini Live realtime input với MIME:
-
-```text
-audio/pcm;rate=16000
-```
+4. Gửi WebSocket binary frame `0x01 + PCM16 bytes` lên Node.
+5. Node forward sang Python service.
+6. Python gửi vào Gemini Live với MIME `audio/pcm;rate=16000`.
 
 ### 4.2 Screen sharing input
 
-FE giữ hướng `REPORT.md`:
-
 1. `navigator.mediaDevices.getDisplayMedia()`.
-2. Capture frame định kỳ, khuyến nghị MVP là 1 FPS hoặc mỗi 1.5 giây.
-3. Resize canvas còn khoảng `640x360` hoặc `768x432`.
-4. Encode JPEG quality `0.65-0.75`.
-5. Gửi binary frame/video JPEG lên Node Gateway.
-6. Node forward sang Python service.
-7. Python gửi vào Gemini Live realtime input với MIME:
+2. Capture frame định kỳ, MVP 1 FPS hoặc mỗi 1.5 giây.
+3. Resize canvas ~640x360 hoặc 768x432.
+4. Encode JPEG quality 0.65-0.75.
+5. Gửi binary `0x02 + JPEG bytes` lên Node.
+6. Node forward sang Python.
+7. Python gửi vào Gemini Live với MIME `image/jpeg`.
 
-```text
-image/jpeg
+### 4.3 pc1-pc2 AEC flow (chi tiết)
+
+```javascript
+// 1. Tạo pc1 và pc2
+const pc1 = new RTCPeerConnection();
+const pc2 = new RTCPeerConnection();
+
+// 2. pc2.ontrack: nhận remote audio từ pc1 -> phát loa
+pc2.ontrack = (event) => {
+  const audio = new Audio();
+  audio.srcObject = event.streams[0];
+  audio.play();  // AEC tự động reference luồng này
+};
+
+// 3. pc1.onicecandidate -> pc2.addIceCandidate (và ngược lại)
+pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+
+// 4. Khi nhận Gemini audio từ WebSocket -> convert thành MediaStreamTrack
+// Dùng AudioWorklet để biến PCM buffer thành track
+const ctx = new AudioContext();
+const workletNode = new AudioWorkletNode(ctx, "pcm-player");
+const dest = ctx.createMediaStreamDestination();
+workletNode.connect(dest);
+
+// 5. add track vào pc1 -> gửi sang pc2
+dest.stream.getTracks().forEach((t) => pc1.addTrack(t));
+
+// 6. Signaling local
+const offer = await pc1.createOffer({ offerToReceiveAudio: false });
+await pc1.setLocalDescription(offer);
+await pc2.setRemoteDescription(offer);
+const answer = await pc2.createAnswer();
+await pc2.setLocalDescription(answer);
+await pc1.setRemoteDescription(answer);
 ```
 
-### 4.3 Model audio output
-
-Model `gemini-live-2.5-flash-native-audio` trả audio native. Luồng output:
+### 4.4 Audio output path
 
 ```text
 Gemini Live audio chunk
   -> ADK Python service
   -> Node Gateway
-  -> FE WebSocket binary audio frame
-  -> AudioStreamer queue
-  -> Web Audio API playback
+  -> FE WebSocket binary frame 0x01 + PCM16
+  -> AudioWorklet decode PCM16 -> Float32
+  -> pc1 -> pc2 -> <audio> playback (AEC enabled)
 ```
-
-FE cần decode PCM 16-bit output sang `Float32Array` trước khi tạo `AudioBuffer`. Nếu model output rate là 24kHz, player dùng sample rate 24000 Hz như `REPORT.md`.
 
 ---
 
@@ -267,19 +340,20 @@ src/live/
   live.routes.ts
   liveSessionManager.ts
   liveAdkBridge.ts
+  liveIpcProtocol.ts
   liveMessage.types.ts
   liveAuth.ts
   tools/
-    liveToolInternalController.ts
     liveToolAdapter.ts
 ```
 
 `liveAdkBridge.ts` chịu trách nhiệm:
 
-- Kết nối Node Gateway với Python ADK service.
+- Spawn Python ADK service làm child process.
+- Giao tiếp IPC qua stdin/stdout với JSON-line protocol (`liveIpcProtocol.ts`).
 - Forward audio/video/text.
 - Nhận audio/transcript/tool/status/frontend-action.
-- Cleanup khi disconnect.
+- Cleanup khi disconnect/kill Python process.
 
 ---
 
@@ -322,7 +396,7 @@ pip install google-adk
 4. Tạo `config.py` đọc env:
    - `GOOGLE_API_KEY` hoặc Vertex AI config nếu dùng Vertex.
    - `LIVE_AGENT_MODEL=gemini-live-2.5-flash-native-audio`.
-   - `NODE_TOOL_PROXY_URL`.
+   - `IPC_MODE=stdio` — Python chạy dưới dạng child process của Node, giao tiếp qua stdin/stdout.
    - timeout/session limits.
 5. Tạo root agent tối thiểu:
 
@@ -401,102 +475,123 @@ Definition of Done:
 
 ---
 
-### Phase 3 — Tool proxy từ Python sang Node
+### Phase 3 — Tool proxy từ Python sang Node (qua IPC)
 
-1. Trong Node.js Chatbot Server, tạo internal endpoint chỉ cho Python service, ví dụ:
+Node spawns Python ADK service làm child process, giao tiếp qua stdin/stdout với JSON-line protocol (mỗi dòng là một JSON message hoàn chỉnh, kết thúc bằng `\n`).
 
-```text
-POST /internal/live-tools/:toolName
-```
+#### 3.1 Protocol messages
 
-2. Request body:
+**Tool call request** (Python → Node, viết ra stdout):
 
 ```json
-{
-  "sessionId": "live-session-id",
-  "userId": "user-id",
-  "locale": "en",
-  "args": {},
-  "authContext": {
-    "userTokenRef": "server-side-token-ref"
-  }
-}
+{"type":"tool_call","id":"req-001","tool":"retrieveKnowledge","sessionId":"live-session-id","userId":"user-id","locale":"en","args":{"query":"AI conferences 2026"}}
 ```
 
-3. Node endpoint gọi `liveToolAdapter.executeTool()` hoặc `functionRegistry` hiện tại.
-4. Response chuẩn:
+**Tool call response** (Node → Python, ghi vào stdin — `frontendActions` đã được Node dispatch trực tiếp xuống FE):
 
 ```json
-{
-  "ok": true,
-  "modelResponseContent": "...",
-  "frontendActions": [],
-  "statusUpdates": [],
-  "debug": {
-    "toolName": "retrieveKnowledge",
-    "durationMs": 1234
-  }
-}
+{"type":"tool_result","id":"req-001","ok":true,"modelResponseContent":"Here are the results..."}
 ```
 
-5. Python `tool_proxy.py` gọi endpoint này.
-6. Mỗi ADK tool wrapper chỉ làm 3 việc:
-   - Validate args cơ bản.
-   - Gọi Node tool proxy.
-   - Return `modelResponseContent` cho agent và emit `frontendActions` về live transport.
+#### 3.2 Node side — `liveAdkBridge.ts`
+
+Khi Node nhận IPC message `tool_call` từ stdout của Python process:
+
+1. Parse JSON message.
+2. Gọi `liveToolAdapter.executeTool()` hoặc `functionRegistry` hiện tại → nhận `modelResponseContent` + `frontendActions`.
+3. **Dispatch `frontendActions` tới FE qua WebSocket** (Node giữ kết nối WebSocket với FE).
+4. Ghi JSON response (chỉ `modelResponseContent`, không gửi lại `frontendActions`) vào stdin của Python process.
+
+#### 3.3 Python side — `tool_proxy.py`
+
+```python
+import sys, json
+
+def handle_tool_call(tool_name: str, args: dict, session_id: str, user_id: str, locale: str) -> dict:
+    """Gửi tool call request sang Node qua stdout, đọc response từ stdin."""
+    req = {
+        "type": "tool_call",
+        "id": f"req-{session_id}-{tool_name}",
+        "tool": tool_name,
+        "sessionId": session_id,
+        "userId": user_id,
+        "locale": locale,
+        "args": args,
+    }
+    sys.stdout.write(json.dumps(req) + "\n")
+    sys.stdout.flush()
+    line = sys.stdin.readline()
+    return json.loads(line)  # trả về { "ok": bool, "modelResponseContent": str }
+```
+
+#### 3.4 ADK tool wrapper pattern
+
+Mỗi ADK tool wrapper chỉ làm 3 việc:
+- Validate args cơ bản.
+- Gọi `handle_tool_call()`.
+- Return `modelResponseContent` cho agent.
+
+**`frontendActions` không qua Python** — Node tự dispatch trực tiếp xuống FE. Đây là điểm khác biệt quan trọng so với kiến trúc HTTP cũ.
 
 Definition of Done:
 
-- Python gọi được Node tool `getWebsiteInfo`.
-- Python gọi được Node tool `retrieveKnowledge`.
+- Node spawns được Python ADK process và giao tiếp IPC.
+- Python gọi được Node tool `getWebsiteInfo` qua IPC.
+- Python gọi được Node tool `retrieveKnowledge` qua IPC.
 - FrontendAction từ Node được gửi ngược về FE qua live gateway.
 
 ---
 
 ### Phase 4 — Live transport Node ↔ Python
 
-Có 2 lựa chọn:
+Node cần 2 kênh giao tiếp với Python: **JSON-line IPC** (tool call, control) và **WebSocket/binary pipe** (audio, screen frame). Audio là binary chunk liên tục, không phù hợp JSON-line overhead.
 
-#### Option A — Python service trực tiếp giữ Gemini Live session
+#### 4.1 Kênh 1: IPC (stdin/stdout) — tool call + control
 
-Node Gateway forward media sang Python service. Python dùng ADK/Gemini Live để xử lý session.
+```text
+Python                         Node
+  │  stdout: {"type":"tool_call",...}  │
+  ├────────────────────────────────────►│ executeTool()
+  │  stdin:  {"type":"tool_result",...} │
+  │◄────────────────────────────────────┤
+```
 
-Ưu điểm:
+#### 4.2 Kênh 2: WebSocket riêng — audio + screen
 
-- ADK Python nắm trọn agent lifecycle.
-- Dễ debug agent trong Python.
+Node mở thêm 1 WebSocket tới Python ADK service song song với IPC stdin/stdout:
 
-Nhược điểm:
+```text
+FE WebSocket                Node Gateway              Python WebSocket Server
+  │ audio PCM16  │             │  audio PCM16  │
+  ├──────────────►├─────────────►───────────────┤
+  │ screen JPEG  │             │  screen JPEG  │
+  ├──────────────►├─────────────►───────────────┤
+  │              │             │               │
+  │◄─────────────┤◄────────────┤ audio PCM out  │← Gemini Live
+```
 
-- Cần thiết kế transport media Node ↔ Python tốt.
+Node chỉ relay binary: FE → Node WebSocket → Python WebSocket → Gemini Live (và ngược lại). Không decode/re-encode.
 
-#### Option B — Node giữ Gemini Live session, Python chỉ làm orchestration
+#### 4.3 Protocol summary
 
-Node vẫn dùng `@google/genai` Live, Python ADK xử lý routing/tool reasoning qua text events.
+| Kênh | Message | Hướng | Payload |
+|---|---|---|---|
+| IPC stdout (Python→Node) | `tool_call` | Python → Node | JSON: tool name + args |
+| IPC stdin (Node→Python) | `tool_result` | Node → Python | JSON: modelResponseContent |
+| WS Python | `audio.input` | Node → Python | PCM16 16kHz binary |
+| WS Python | `video.input` | Node → Python | JPEG binary |
+| WS Python | `audio.output` | Python → Node | PCM output chunk |
+| WS Python | `transcript` | Python → Node | JSON text |
+| WS Python | `status` | Python → Node | JSON: agent status |
+| WS Python | `session.close` | hai chiều | reason JSON |
 
-Không khuyến nghị cho yêu cầu này vì mục tiêu là dựa vào Google ADK Python cho multi-agent live.
+#### 4.4 Chọn cho MVP
 
-#### Chọn cho MVP
-
-Chọn **Option A**.
-
-Node ↔ Python protocol đề xuất:
-
-| Message | Hướng | Payload |
-|---|---|---|
-| `session.start` | Node → Python | user/session/locale/model config |
-| `audio.input` | Node → Python | PCM16 16kHz binary/base64 |
-| `video.input` | Node → Python | JPEG binary/base64 |
-| `text.input` | Node → Python | fallback text |
-| `audio.output` | Python → Node | PCM output chunk |
-| `transcript` | Python → Node | user/model transcript |
-| `frontend_action` | Python → Node | actions từ tool result |
-| `status` | Python → Node | agent status |
-| `session.close` | hai chiều | reason |
+Chọn **Option A** (Python giữ Gemini Live session). Node spawns Python, IPC cho tool, WebSocket riêng cho media.
 
 Definition of Done:
 
-- Node nhận audio từ FE và forward tới Python.
+- Node nhận audio từ FE và forward tới Python (qua WebSocket media pipe).
 - Python trả audio output về Node.
 - Node forward audio output về FE.
 
@@ -548,12 +643,17 @@ ws(s)://<chatbot-server>/api/live-agent
    - Server gửi `session.auth_required`.
    - Client gửi `{ type: "auth", payload: { token, locale } }`.
    - Server verify rồi tạo live session.
-4. Audio input frame:
-   - Binary `0x01 + PCM16 bytes`.
-5. Screen frame:
-   - Binary `0x02 + JPEG bytes`.
-6. Server output audio:
-   - Binary `0x01 + PCM output bytes`.
+4. PC1-PC2 setup (kích hoạt AEC):
+   - Tạo `pc1` và `pc2` local RTCPeerConnection.
+   - Signaling local: offer/answer trao đổi trong cùng tab.
+   - `pc2.ontrack` → play qua `<audio>` element.
+   - Khi nhận Gemini audio PCM từ WebSocket → AudioWorklet → MediaStreamTrack → `pc1.addTrack()` → `pc2` → loa.
+5. Audio input (mic → server):
+   - `getUserMedia` → Web Audio → Float32Array → PCM16 Int16Array.
+   - Binary WebSocket frame `0x01 + PCM16 bytes`.
+6. Screen frame:
+   - `getDisplayMedia` → canvas resize ~640x360 → JPEG quality 0.7.
+   - Binary WebSocket frame `0x02 + JPEG bytes`.
 7. JSON output events:
    - `transcript`
    - `status`
@@ -568,6 +668,7 @@ Definition of Done:
 - API key Gemini không xuất hiện trong frontend bundle.
 - FE capture mic/share screen và gửi được lên Node.
 - FE nhận audio/transcript/action từ Node.
+- FE có pc1-pc2 local WebRTC, AEC hoạt động, không loop âm thanh.
 
 ---
 
@@ -628,7 +729,7 @@ Definition of Done:
 
 | Module | Test |
 |---|---|
-| Python `tool_proxy.py` | Gọi mock Node tool endpoint, parse success/error |
+| Python `tool_proxy.py` | Gửi/receive JSON-line IPC message, parse success/error |
 | Python agent routing | Intent conference/navigation/admin/website đúng agent |
 | Node live gateway | Auth, reject unauthenticated binary frames |
 | FE audio capture | PCM16 conversion đúng |
@@ -704,7 +805,7 @@ MVP hoàn thành khi:
 
 | Rủi ro | Tác động | Giảm thiểu |
 |---|---|---|
-| ADK Python và Node transport phức tạp | Delay MVP | Làm transport tối giản trước: text/audio/video/status/action |
+| ADK Python và Node IPC transport phức tạp | Delay MVP | Làm transport tối giản trước: text/audio/video/status/action qua JSON-line |
 | Audio format sai | Model nghe sai hoặc FE phát rè | Chuẩn hóa PCM16 16kHz input, test bằng sample audio |
 | Screen frame quá lớn | Tốn bandwidth/cost | Giới hạn FPS, JPEG quality, max bytes |
 | Agent hiểu nhầm screen | Action sai | Confidence guard + hỏi lại |
@@ -720,8 +821,8 @@ MVP hoàn thành khi:
 2. Tạo `adk_live_service` Python project, cài `google-adk`.
 3. Tạo root `LiveHostAgent` và 4 sub-agents.
 4. Viết instruction live rút gọn từ `english.ts`.
-5. Tạo Node internal tool endpoint.
-6. Tạo Python `tool_proxy.py` và ADK tool wrappers.
+5. Tạo IPC protocol (`liveIpcProtocol.ts`) và `liveToolAdapter.ts`.
+6. Tạo Python `tool_proxy.py` (IPC stdin/stdout) và ADK tool wrappers.
 7. Tạo Node ↔ Python live transport.
 8. Refactor FE live chat sang Node WebSocket bridge.
 9. Implement mic PCM16 và screen JPEG theo `REPORT.md`.
