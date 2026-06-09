@@ -1,109 +1,73 @@
-"+ - If the current user query is not strongly related to the previous query or active result set, you MUST ask a clarification before using prior context: ask whether the user wants to start a completely new query or continue from the previous query/context."
--> Không hiểu ý đồ của câu prompt này là gì?
+# Thay đổi 1
+```patch
+-2. **TOOL-AWARE USAGE** — Each tool's function declaration documents every parameter it accepts. Read it. \`retrieveKnowledge\` supports: query, limit, listMode, conferenceFields, filter (rank, accessType, startDate, endDate, country, continent, and more), and useRecommendationFilter (defaults to true for list searches). Use ALL parameters relevant to the user's request. For list/search/browse queries, ALWAYS set listMode=true so the system can personalize results.
++2. **TOOL-AWARE USAGE** — Each tool's function declaration documents every parameter it accepts. Read it. \`retrieveKnowledge\` supports: query, limit, listMode, conferenceFields, and filter with fields: rank, startDate, endDate, tableName, and more. Use the parameters that match the request, and if a needed field is missing from a compact list response, request the missing data instead of inventing it. E.g., if the user says "ranked B and above", the ConferenceAgent should pass filter: { rank: "A*,A,B" }.
+```
+-> Cần kết hợp lại cả hai cái. Vì mỗi cái riêng lẻ đều thiếu ý.
 
-"+ - If the user wants to filter/sort/refine/paginate a list you just returned, do it from memory — do NOT route or call tools."
--> Lỡ chatbot trả về list không chứa thông tin cần thiết để filter hay sort thì sao? Ví dụ như người dùng yêu cầu filter theo rank mà list trước đó không có trường rank cho mỗi hội nghị -> phải route để gọi tool -> mâu thuẫn.\
+# Thay đổi 2
+```patch
+-   - **FIRST: Search the context window** — look through your own previous turns (role="model") and user messages (role="user") to identify the conference or list directly. If found, use \`query\`, \`identifier\`, and \`identifierType\` parameters when calling tools. **Do NOT use \`conferenceRef\` if the conference is identifiable from context.**
++   - **FIRST: Search the context window** — look through your own previous turns (role="model") and user messages (role="user") to identify the conference or list directly.
++   - **CRITICAL: If the conference/list is found in context window**, you MUST extract and pass the specific identifier (title, acronym, or ID) in the taskDescription to the subagent. Do NOT rely on the subagent to resolve via conferenceRef.
++   - **Example:** If context contains "ICML 2025" and user says "follow that one", taskDescription should be "Follow ICML conference" (with identifier), NOT "Follow the conference from the previous list" (which would trigger conferenceRef).
+```
+-> Sửa thành:
+```markdown
+   - **FIRST: Search the context window** — look through your own previous turns (role="model") and user messages (role="user") to identify the conference or list directly. If found, use \`query\`, \`identifier\`, and \`identifierType\` parameters when calling tools. **Do NOT use \`conferenceRef\` if the conference is identifiable from context.**
+   - **CRITICAL: If the conference/list is found in context window**, you MUST extract and pass the specific identifier (title, acronym, or ID) in the taskDescription to the subagent. Do NOT rely on the subagent to resolve via conferenceRef.
+   - **Example:** If context contains "ICML 2025" and user says "follow that one", taskDescription should be "Follow ICML conference" (with identifier), NOT "Follow the conference from the previous list" (which would trigger conferenceRef).
+```
 
-"**RESULT SET SAVING — AUTO-SAVED FOR MODEL RESULTS**"
--> Sửa thành **RESULT SET SAVING — CONTROLLED BY HOST AGENT**
-
-"Do NOT call \`saveResultSet\` for model-generated ConferenceAgent result lists. ConferenceAgent auto-saves real UUIDs from \`retrieveKnowledge\` for later ordinal references."
--> Sửa thành "You (HostAgent) must call \`saveResultSet\` to save these lists for later ordinal reference."
-
-"-- Extract the conference identifiers from the result (can be IDs, titles, acronyms)
--- Call \`saveResultSet\` yourself with the list of identifiers
--- The identifiers MUST be passed in the correct order (first identifier = position 1, second identifier = position 2, etc.)
--- DO NOT pass identifiers in random order
--- The \`description\` parameter MUST be natural English prose describing the list content (e.g., "list of AI conferences for 2025", "user's shortlist of machine learning conferences"). **NEVER use slug/code formats like "user_relevant_conf", "search_results_1", or similar.**
--- Example: saveResultSet({ description: "list of top AI conferences", orderedIdentifiers: [{type: "acronym", value: "ICML"}, {type: "acronym", value: "NeurIPS"}, {type: "acronym", value: "AAAI"}], source: "model" })
-+- Present the returned list directly to the user.
-+- Do not manually save model-generated identifiers; this can duplicate state or save weaker acronyms instead of UUIDs."
+# Thay đổi 3
+```patch
+-retrieveKnowledge auto-personalizes all conference list searches by default (useRecommendationFilter defaults to true when listMode=true). Set useRecommendationFilter=false only for non-search actions: view details, follow/unfollow, calendar operations, rating/feedback, or blacklist.
+-
+-Routing rules:
+-- Generic "recommend for me" (no constraints at all) → getRecommendations tool
+-- Any broad conference search / browse / list query → retrieveKnowledge with listMode=true
+-- Detail view of a specific conference → retrieveKnowledge with listMode=false
+-- Continuation request ("show more", "next page") → showMoreRecommendations tool
+-- Similar conferences → getSimilarConferences tool
++ConferenceAgent retrieveKnowledge supports useRecommendationFilter for personalized conference list searches.
++Personalized recommendation routing is strict:
++- Generic personalized recommendation without constraints, such as "recommend conferences for me", uses getRecommendations.
++- Personalized recommendation with constraints, such as topic, rank, location, date, access type, or "AI conferences", uses retrieveKnowledge with listMode=true and useRecommendationFilter=true.
++- showMoreRecommendations is only for explicit continuation requests such as "show more recommendations" or "next recommendations".
+```
 -> Revert lại thay đổi này.
 
-"-- When saving model-generated lists, use \`source: "model"\`
-+- Do not save model-generated lists manually."
--> Revert lại thay đổi này.
+# Thay đổi 4
+```patch
+-     - **Generic recommendations** (no constraints, just "recommend for me"): Route to 'ConferenceAgent'. 'taskDescription' = "Use getRecommendations for unconstrained recommendation."
+-     - **Any broad conference search** (topic, rank, location, date, type): Route to 'ConferenceAgent'. 'taskDescription' = "Use retrieveKnowledge with listMode=true. Personalization is automatic via useRecommendationFilter (defaults to true)."
+-     - **Similar conferences**: Route to 'ConferenceAgent'. 'taskDescription' = "Find conferences similar to [conference]."
+-     - **Continuation** ("show more", "next page"): Route to 'ConferenceAgent'. 'taskDescription' = "Use showMoreRecommendations." Do NOT call retrieveKnowledge again.
++     - If the user asks for generic personalized recommendations without constraints (e.g., "recommend me some conferences", "conferences I may like"): Route to 'ConferenceAgent'. 'taskDescription' = "Recommend conferences for the user. Use getRecommendations because the request has no topic/rank/location/date/type constraints."
++     - If the user asks for personalized recommendations with constraints (e.g., "recommend me AI conferences", "recommend rank B conferences", "recommend conferences in Vietnam", "suggest free-access conferences for me"): Route to 'ConferenceAgent'. 'taskDescription' = "Find personalized recommended conferences matching [constraints]. Use retrieveKnowledge with listMode=true and useRecommendationFilter=true. Do not use getRecommendations for this constrained request."
++     - If the user asks for similar conferences: Route to 'ConferenceAgent'. 'taskDescription' = "Find conferences similar to the [conference name or acronym] conference."
++     - If the user explicitly asks to see more recommendation or conference-list results from the previous list (e.g., "show more", "more conferences", "next page", "next set"): Route to 'ConferenceAgent'. 'taskDescription' = "Show more recommendations from the last list." Do NOT mention retrieveKnowledge in this continuation task.
+```
+-> Sửa thành:
+```markdown
+- If the user asks for generic personalized recommendations without constraints (e.g., "recommend me some conferences", "conferences I may like"): Route to 'ConferenceAgent'. 'taskDescription' = "Recommend conferences for the user. Use getRecommendations because the request has no topic/rank/location/date/type/... constraints."
+- If the user asks for personalized recommendations with constraints (e.g., "recommend me AI conferences", "recommend rank B conferences", "recommend conferences in Vietnam", "suggest free-access conferences for me"): Route to 'ConferenceAgent'. 'taskDescription' = "Find personalized recommended conferences matching [constraints]. Use retrieveKnowledge with listMode=true and useRecommendationFilter=true. Do not use getRecommendations for this constrained request."
+- **Any broad conference search** (topic, rank, location, date, type,...): Route to 'ConferenceAgent'. 'taskDescription' = "Use retrieveKnowledge with listMode=true. Personalization is automatic via useRecommendationFilter (defaults to true)."
+- If the user asks for similar conferences: Route to 'ConferenceAgent'. 'taskDescription' = "Find conferences similar to the [conference name or acronym] conference."
+- **Continuation** ("show more", "next page"): Route to 'ConferenceAgent'. 'taskDescription' = "Use showMoreRecommendations." Do NOT call retrieveKnowledge again.
+```
 
-"+**E1 — Filter existing list (Context-First)**
-
-- History: You just returned a list of 10 conferences from a previous routeToAgent call.
-- User: "filter the conference list by september"
-- ✓ CORRECT: Filter from memory. Among the 10, only some match September. Return those.
-- ✗ WRONG: Call routeToAgent or retrieveKnowledge again. The data is already in context.
-- Why: Data already exists in conversation history. Filtering is a memory operation."
-  -> Fix lại để nếu data đã có trong context thì không gọi routeToAgent, nhưng nếu data KHÔNG TỒN TẠI trong context(thiếu thông tin về thời gian), phải gọi retrieveKnowledge lại.
-
-"+ - For conference list queries (\`listMode = true\`), expect a compact list payload: **id, title, acronym, date, location**. Full address, ranks, and status are NOT included in list mode to fit more results. Do **not** invent or expand missing long fields."
-
--> Có thể gây nhầm lẫn. Chatbot hoàn toàn CÓ THỂ expand thêm trường mới sử dụng tham số conferenceFields trong hàm retrieveKnowledge -> mâu thuẫn.
-
-"- - If the user asks for personalized recommendations or "recommend for me": Route to 'ConferenceAgent'. 'taskDescription' = "Recommend conferences for the user." Include topics or a recent keyword if provided.
-
--     - If the user asks for generic personalized recommendations without constraints (e.g., "recommend me some conferences", "conferences I may like"): Route to 'ConferenceAgent'. 'taskDescription' = "Recommend conferences for the user. Use getRecommendations because the request has no topic/rank/location/date/type constraints."
--     - If the user asks for personalized recommendations with constraints (e.g., "recommend me AI conferences", "recommend rank B conferences", "recommend conferences in Vietnam", "suggest free-access conferences for me"): Route to 'ConferenceAgent'. 'taskDescription' = "Find personalized recommended conferences matching [constraints]. Use retrieveKnowledge with listMode=true and useRecommendationFilter=true. Do not use getRecommendations for this constrained request.""
-
-"- - If the user asks to see more results: Route to 'ConferenceAgent'. 'taskDescription' = "Show more recommendations from the last list."
-
--     - If the user explicitly asks to see more recommendation or conference-list results from the previous list (e.g., "show more", "more conferences", "next page", "next set"): Route to 'ConferenceAgent'. 'taskDescription' = "Show more recommendations from the last list." Do NOT mention retrieveKnowledge in this continuation task."
-  -> Các chỗ này mặc dù đúng ý nhưng mà sai format. Format của taskDescription coi lại trong file english.ts.
-
-"-8. **RESULT SET SAVING — CONTROLLED BY HOST AGENT**
-+8. **RESULT SET SAVING — AUTO-SAVED FOR MODEL RESULTS**"
--> Revert thay đổi này.
-
-"- You (HostAgent) must call \`saveResultSet\` to save these lists for later ordinal reference.
-
-- Do NOT call \`saveResultSet\` for model-generated ConferenceAgent result lists. ConferenceAgent auto-saves real UUIDs from \`retrieveKnowledge\` for later ordinal references."
-  -> Revert thay đổi này.
-
-"- - Extract the conference identifiers from the result (can be IDs, titles, acronyms)
-
-- - Call \`saveResultSet\` yourself with the list of identifiers
-- - The identifiers MUST be passed in the correct order (first identifier = position 1, second identifier = position 2, etc.)
-- - DO NOT pass identifiers in random order
-- - The \`description\` parameter MUST be natural English prose describing the list (e.g., "list of AI conferences for 2025", "user's shortlist of machine learning conferences"). **NEVER use slug/code formats like "user_relevant_conf", "search_results_1", or similar.**
-- - Example: saveResultSet({ description: "list of top AI conferences", orderedIdentifiers: [{type: "acronym", value: "ICML"}, {type: "acronym", value: "NeurIPS"}, {type: "acronym", value: "AAAI"}], source: "model" })
-
-* - Present the returned list directly to the user.
-* - Do not manually save model-generated identifiers; this can duplicate state or save weaker acronyms instead of UUIDs."
-    -> Revert thay đổi này.
-
-"- - When saving model-generated lists, use \`source: "model"\`
-
-- - Do not save model-generated lists manually."
-    -> Revert thay đổi này.
-
-"- \* **For list-style queries asking for conferences about a topic/keyword (e.g., "list of conferences about AI"), you MUST use Self-RAG via the 'retrieveKnowledge' tool with \`listMode = true\` and \`filter = { tableName: 'conferences' }\`.**
-
--        *   **In general, use the 'retrieveKnowledge' tool for conference search.** For list requests, keep the response compact (id, title, acronym, date, location, status).
--        *   Request detailed retrieval only when the user explicitly asks for detailed conference content.
-
-*
-*        *   **\`conferenceFields\` CONTROLS RESPONSE SIZE.** The HostAgent has a 2500-char limit for function responses. Using too many fields truncates the response and silently drops items.
-*
-*        *   **When \`listMode = true\` (broad list/search/browse):**
-*            *   Set ONLY these fields in \`conferenceFields\`:
-*                - Required: \`id: true\`, \`title: true\`, \`acronym: true\`
-*                - Location: \`locations.cityStateProvince: true\`, \`locations.country: true\`
-*                - Date: \`dates.fromDate: true\`, \`dates.toDate: true\`, \`dates.sortOrder: "desc"\`, \`dates.limit: 1\`
-*            *   Set ALL other fields to \`false\`: \`status\`, \`address\`, \`dates.name\`, \`ranks\`, \`topics\`.
-*            *   Use \`filter: { tableName: "conferences" }\`. Pass ADDITIONAL filter params (rank, startDate, endDate, country, continent, cityStateProvince, location, accessType) when the user specifies criteria.
-*            *   For broad logged-in list searches, set \`useRecommendationFilter: true\` unless the task is a specific conference lookup or explicitly asks for unpersonalized/global results.
-*            *   For constrained personalized recommendation requests, always call \`retrieveKnowledge\` with \`listMode: true\` and \`useRecommendationFilter: true\`. Examples: "recommend me AI conferences", "recommend rank B conferences", "recommend conferences in Vietnam", "suggest free-access conferences for me". Do NOT use \`getRecommendations\` for constrained recommendation requests.
-*            *   For location-constrained recommendations, ALWAYS pass a structured location filter. Use \`filter.country\` for countries. Normalize "USA", "U.S.", "America", and "United States" to \`country: ["United States"]\`.
-*            *   **Quick reference:**
-*                | Scenario | listMode | filter | conferenceFields |
-*                |----------|----------|--------|-----------------|
-*                | Generic personalized recommendation | use getRecommendations | n/a | n/a |
-*                | Constrained personalized recommendation | true | { constraints, tableName } | compact |
-*                | List by topic | true | { rank?, tableName } | compact (no address/ranks) |
-*                | List by date range | true | { startDate?, endDate?, tableName } | compact |
-*                | List by rank | true | { rank, tableName } | compact |
-*                | List/recommend by country | true | { country, tableName } | compact |
-*                | Detail (1 conference) | false | { tableName } | ALL fields |
-*                | Compare 2+ conferences | false | { tableName } | ALL fields |
-*
-*        *   **When \`listMode = false\` (detail / compare):**
-*            *   Set ALL relevant \`conferenceFields\` to \`true\`: \`id\`, \`title\`, \`acronym\`, \`status\`, \`organizations.locations.address\`, full \`organizations.dates\`, \`ranks\`, \`topics\`.
-*            *   For **compare 2 conferences**: call \`retrieveKnowledge\` separately for each item with \`listMode = false\`."
-  -> Hơi nguy hiểm ở mấy chỗ này: Set ONLY these fields in \`conferenceFields\` sẽ làm cho ngay cả khi người dùng muốn show những thông tin mà họ tự chọn thì chatbot cũng sẽ chỉ làm theo ý system prompt. Bên cạnh đó filter theo location cũng khá nguy hiểm tại vì theo tui nhớ không lầm thì nó chỉ chống sai chính tả thôi. Lỡ mà trong data tên thành phố là "Thành phố Hồ Chí Minh" mà chatbot truyền vào filter là "TPHCM", "TP.HCM" hay "Sài Gòn" các kiểu là chết.
+- Tuy nhiên, taskDescription phải đúng theo format:
+```md
+\`\`\`
+USER INPUT:
+[Original user request]
+---
+[Optional, only when retrying same subagent with same task]
+ATTEMPT {n} (n >= 2)
+REASON: The previous attempts have these issues: [list issues]
+---
+[Optional, for additional instructions]
+ADDITIONAL INSTRUCTION: [additional instructions for the subagent]
+\`\`\`
+```
