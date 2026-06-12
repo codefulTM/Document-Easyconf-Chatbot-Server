@@ -174,32 +174,45 @@ Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20
 
 ## 7. Thiết kế CDC mức thấp với `pg-logical-replication`
 
-1. Bật logical replication cho DB nguồn.
-2. Tạo replication slot và publication cho các bảng cần theo dõi.
-3. Viết CDC worker dùng `pg-logical-replication` để đọc WAL changes.
-4. Bắt và xử lý đủ các loại event schema-change và data-change:
-   - `INSERT`
-   - `UPDATE`
-   - `DELETE`
-   - đổi tên bảng
-   - đổi tên trường
-   - xóa bảng
-   - xóa trường
-5. Khi đổi tên bảng hoặc trường:
-   - cập nhật mapping metadata của `Chunks.tableName` / `Chunks.fieldName`
-   - giữ nguyên `recordId`, `contentHash`, `embeddingId` nếu nội dung không đổi
-   - tạo alias mapping tạm thời giữa tên cũ và tên mới để replay/checkpoint không bị lệch
-6. Khi xóa bảng hoặc trường:
-   - đánh dấu toàn bộ chunk liên quan là stale/deleted
-   - ưu tiên soft delete thay vì xóa vật lý ngay
-   - nếu xóa trường thì chỉ xử lý các chunk có `fieldName` tương ứng
-   - nếu xóa bảng thì xử lý toàn bộ chunk của `tableName` đó
-7. Chỉ ACK event khi đã:
-    - parse xong,
-    - map xong,
-    - cập nhật `Chunks` và `Embeddings` xong,
-    - ghi checkpoint xong.
-8. Nếu xử lý fail giữa chừng, không ACK để event được redeliver.
+1. Tạo bảng checkpoint CDC:
+   ```sql
+   CREATE TABLE cdc_state (
+       id int PRIMARY KEY,
+       processed_lsn pg_lsn NULL
+   );
+   ```
+   - `processed_lsn` phải nullable để phân biệt trạng thái chưa bootstrap với trạng thái đã chạy CDC.
+2. Bật logical replication cho DB nguồn(chỉnh wal_level = logical, max_replication_slots = 1, max_wal_senders = 1). Tham số thứ 1 cần cho pg-logical-replication còn 2 tham số cuối là do chỉ có 1 consumer.
+3. Tạo replication slot và publication cho các bảng cần theo dõi.
+4. Khi ứng dụng khởi chạy, đọc `cdc_state.processed_lsn`:
+   - nếu `processed_lsn IS NULL` thì hiểu là chưa từng tạo snapshot và sync dữ liệu;
+   - khi đó phải tạo snapshot cho trạng thái DB hiện tại và sync toàn bộ các bảng trong phạm vi RAG;
+   - sau khi bootstrap xong, ghi `processed_lsn` về mốc LSN khởi tạo tương ứng để CDC bắt đầu từ ranh giới đó.
+5. Nếu `processed_lsn IS NOT NULL`, chạy CDC worker đọc WAL kể từ `processed_lsn`.
+6. Mỗi khi worker xử lý xong một `LSN` và sync xong dữ liệu tương ứng, phải cập nhật lại `cdc_state.processed_lsn`.
+7. Viết CDC worker dùng `pg-logical-replication` để đọc WAL changes.
+8. Bắt và xử lý đủ các loại event schema-change và data-change:
+    - `INSERT`
+    - `UPDATE`
+    - `DELETE`
+    - đổi tên bảng
+    - đổi tên trường
+    - xóa bảng
+    - xóa trường
+9. Khi đổi tên bảng hoặc trường:
+    - cập nhật mapping metadata của `Chunks.tableName` / `Chunks.fieldName`
+    - giữ nguyên `recordId`, `contentHash`, `embeddingId` nếu nội dung không đổi
+    - tạo alias mapping tạm thời giữa tên cũ và tên mới để replay/checkpoint không bị lệch
+10. Khi xóa bảng hoặc trường:
+    - xóa toàn bộ chunk liên quan
+    - nếu xóa trường thì chỉ xử lý các chunk có `fieldName` tương ứng
+    - nếu xóa bảng thì xử lý toàn bộ chunk của `tableName` đó
+11. Chỉ ACK event khi đã:
+     - parse xong,
+     - map xong,
+     - cập nhật `Chunks` và `Embeddings` xong,
+     - ghi checkpoint xong.
+12. Nếu xử lý fail giữa chừng, không ACK để event được redeliver.
 
 Deliverable: CDC worker tối thiểu có checkpoint + ack đúng thời điểm.
 
