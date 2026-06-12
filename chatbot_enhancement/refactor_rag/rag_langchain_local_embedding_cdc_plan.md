@@ -19,11 +19,7 @@ Refactor hệ thống RAG của `Easyconf-Chatbot-Server` theo các yêu cầu:
 ## 1. Chốt phạm vi dữ liệu RAG
 
 1. Rà soát `Code/Easyconf-BE/prisma/schema.prisma` để chốt các bảng/cột sẽ đưa vào RAG.
-2. Phân loại dữ liệu theo mức độ hữu ích cho retrieval:
-   - Nhóm conference: `Conferences`, `ConferenceOrganizations`, `ConferenceDates`, `ConferenceTopics`, `ConferenceRanks`, `FieldOfResearchs`, `Ranks`, `Sources`.
-   - Nhóm user-facing metadata: `Locations`, `Topics`, `Journals`, `JournalDetails`, `JournalAreas`, `JournalStatistics`, `JournalQuartiles`, `JournalTopics`, `JournalBioxBio`.
-   - Nhóm trạng thái/interaction: các bảng like/follow/feedback/notification chỉ đưa vào nếu thật sự cần semantic retrieval.
-3. Chốt mapping mỗi bảng thành một document RAG có cấu trúc rõ ràng: `entity_type`, `entity_id`, `version`, `updated_at`, `content`, `metadata`.
+2. Phân loại dữ liệu theo mức độ hữu ích cho retrieval.
 
 Deliverable: danh sách bảng/cột được phép index và format document chuẩn hóa.
 
@@ -55,7 +51,7 @@ Note: Trong file khảo sát:
    - `Chunks.embeddingId`
    - `Embeddings.id`
    - `Embeddings.embedding`
-   - nếu cần version hóa: `doc_version = <updated_at or LSN>`.
+   - nếu cần version hóa: `doc_version = <LSN>`.
 4. Định nghĩa rõ ranh giới giữa các luồng:
    - backfill đọc snapshot cũ, xử lý ở tầng code rồi ghi đích
    - CDC đọc WAL event và chỉ apply sau checkpoint khởi tạo
@@ -66,21 +62,7 @@ Deliverable: sơ đồ luồng dữ liệu và chuẩn định danh document.
 ---
 
 ## 3. Chọn embedding model local
-
-1. Ưu tiên model local nhẹ, đa ngôn ngữ, chạy tốt trên CPU:
-   - `intfloat/multilingual-e5-small` nếu cần chất lượng tốt và đa ngôn ngữ.
-   - `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` nếu ưu tiên nhẹ hơn.
-2. Dùng **LangChain Embeddings wrappers** cho local model để thay cho `EmbeddingService` tự bọc pipeline thủ công.
-3. Chọn runtime local phù hợp với wrapper:
-   - `@langchain/community` + `HuggingFaceTransformersEmbeddings` nếu muốn chạy local qua transformers.
-   - `@langchain/community` + `OllamaEmbeddings` nếu muốn model local qua Ollama.
-4. Chuẩn hóa interface embedding ở tầng application:
-   - `embedQuery(text)` cho query
-   - `embedDocuments(texts)` cho batch document
-   - giữ thống nhất dimension, metric similarity, và batch size
-5. Nếu cần đổi model về sau, chỉ thay wrapper/config, không đổi contract của pipeline backfill/CDC/hybrid search.
-
-Deliverable: model được chọn, benchmark sơ bộ, và quy tắc embed thống nhất.
+- Giữ nguyên model hiện tại.
 
 ---
 
@@ -90,8 +72,6 @@ Deliverable: model được chọn, benchmark sơ bộ, và quy tắc embed th�
 2. Tạo bảng/vector schema riêng cho RAG, ví dụ:
    - `Chunks`
    - `Embeddings`
-   - `rag_document_versions`
-   - `rag_change_log`
 3. Lưu tối thiểu:
    - `Chunks.id`
    - `Chunks.tableName`
@@ -129,7 +109,7 @@ Deliverable: schema vector store và chiến lược upsert.
     - chỉ dùng `RecursiveCharacterTextSplitter` để chunk text đầu vào.
     - khi input dưới 3000 ký tự thì không split, trả về một chunk duy nhất.
     - khi input từ 3000 ký tự trở lên, dùng `RecursiveCharacterTextSplitter` để chunk.
-    - giữ metadata hiện tại (`tableName`, `id`, `heading`, `chunkIndex`, `chunkId`) để không phá các consumer đang dùng `Chunk`.
+    - xóa metadata.
 
 Deliverable: danh sách mapper cho từng bảng quan trọng.
 

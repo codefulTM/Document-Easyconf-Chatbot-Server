@@ -18,6 +18,7 @@ model ConferenceDates {
   isAvailable Boolean  // 1
 }
 
+// Một lần tổ chức hội nghị cụ thể
 model ConferenceOrganizations {
   id                      String   @id @default(uuid()) // 1
   year                    Int?     // 1
@@ -119,7 +120,4 @@ model ConferenceBlacklists {
 
   conferenceId String   // 1
   userId       String   // 1
-
-  createdAt    DateTime @default(now()) @db.Timestamptz(6) // 1
-  updatedAt    DateTime @updatedAt @db.Timestamptz(6)      // 1
 }
