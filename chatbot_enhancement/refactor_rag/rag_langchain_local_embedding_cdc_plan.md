@@ -95,12 +95,25 @@ Deliverable: schema vector store và chiến lược upsert.
 ## 5. Thiết kế pipeline build document từ DB
 
 1. Khi chunking value của một field trong một bảng, áp dụng pipeline sau:
-   - chunk value thành nhiều chunk nhỏ trước khi embed.
-   - với mỗi chunk, tính `contentHash`.
-   - nếu tồn tại bản ghi trong `Chunks` có cùng `tableName`, `recordId`, `fieldName`, `contentHash` thì skip chunk đó.
-   - nếu chunk có cùng `tableName`, `fieldName`, `contentHash` nhưng khác `recordId`, chỉ tạo thêm một dòng mới trong `Chunks` với `recordId` và `id` khác, còn lại giữ nguyên.
-   - chunk nào không bị skip thì embed bằng local embedding model, lưu vector vào `Embeddings`, rồi lưu `embeddingId` tương ứng vào `Chunks`.
-   - sau khi xử lý xong field hiện tại, các chunk cũ cùng `tableName` + `recordId` + `fieldName` nhưng không còn xuất hiện ở lần chunk mới, cũng không được tạo mới trong đợt này và cũng không nằm trong đống chunk có sẵn bị skip thì xóa khỏi `Chunks`.
+   - value là null/undefined -> xem như value bị xóa -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey`
+   - cast value thành `stringValue`.
+   - `stringValue` rỗng -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey`.
+   - Xét các chunk có cùng `tableName`, `fieldName`, `primaryKey`(1)
+      - if `originalContent` === `stringValue`: bỏ qua
+      - else (`originalContent` !== `stringValue`): có thay đổi về value -> xử lý như sau:
+         - xóa embedding mỗi chunk đang sử dụng KHI VÀ CHỈ KHI embedding đang không được sử dụng bởi chunk nào khác
+         - xóa chunk có cùng `tableName`, `fieldName`, `originalContent` !== `stringValue`, cùng `primaryKey`
+   - Tìm tập chunk có cùng `tableName`, `fieldName`, khác `primaryKey`:
+      - có `originalContent` === `stringValue`:
+         - clone ra thêm các chunk có cùng nội dung nhưng đổi `primaryKey`, `id`. 
+         - mục đích là để khỏi chunking, khỏi lấy embedding mà vẫn có nội dung.
+         - return.
+   - thêm vào các chunk có cùng `tableName`, `fieldName`, `primaryKey` và `originalContent` mới = `stringValue`:
+      - cắt `stringValue` thành các chunk -> `content`
+      - lấy embedding cho mỗi chunk
+      - nếu embedding có trong `Embeddings` rồi(hiếm nhma cứ kiểm cho chắc) -> tái sử dụng embeddingId. nếu không -> thêm mới embedding
+      - thêm mới chunk
+               
 2. Định nghĩa versioning rule:
      - CDC `LSN` là nguồn sự thật cuối cùng cho ordering.
 

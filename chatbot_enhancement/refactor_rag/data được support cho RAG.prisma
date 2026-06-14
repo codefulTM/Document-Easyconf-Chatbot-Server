@@ -80,7 +80,7 @@ model Conferences {
   title     String   // 3
   acronym   String   // 2
 
-  status    String   // 2
+  status    String   // 3
 }
 
 <!-- Chỉ là bảng liên kết -->
