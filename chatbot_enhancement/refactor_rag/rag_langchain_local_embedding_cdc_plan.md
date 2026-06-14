@@ -10,8 +10,8 @@ Refactor hệ thống RAG của `Easyconf-Chatbot-Server` theo các yêu cầu:
 - Refactor **`retrievalService.ts`** sang **Drizzle ORM** để thực hiện hybrid search trong **một query duy nhất** bằng query builder.
 - Dùng **local embedding model** nhẹ, hỗ trợ đa ngôn ngữ.
 - Dữ liệu RAG lấy từ **các cột trong các bảng PostgreSQL** dựa trên schema của `Easyconf-BE`.
-- Dùng **CDC mức thấp** qua `pg-logical-replication` để tự động đồng bộ dữ liệu.
-- Chỉ gửi **ACK sau khi event đã được xử lý xong**.
+- Dùng **CDC qua Debezium PostgreSQL Connector** để tự động đồng bộ dữ liệu.
+- Chỉ **commit Kafka offset sau khi event đã được xử lý xong thành công**.
 - Hỗ trợ xử lý bất đồng bộ nhưng **không được ghi đè sai thứ tự** khi event đến out-of-order.
 
 ---
@@ -47,11 +47,11 @@ Note: Trong file khảo sát:
    - `Chunks.tableName`
    - `Chunks.recordId`
    - `Chunks.fieldName`
-   - `Chunks.contentHash`
+   - `Chunks.originalContent`
+   - `Chunks.content`
    - `Chunks.embeddingId`
    - `Embeddings.id`
    - `Embeddings.embedding`
-   - nếu cần version hóa: `doc_version = <LSN>`.
 4. Định nghĩa rõ ranh giới giữa các luồng:
    - backfill đọc snapshot cũ, xử lý ở tầng code rồi ghi đích
    - CDC đọc WAL event và chỉ apply sau checkpoint khởi tạo
@@ -75,18 +75,36 @@ Deliverable: sơ đồ luồng dữ liệu và chuẩn định danh document.
 3. Lưu tối thiểu:
    - `Chunks.id`
    - `Chunks.tableName`
-   - `Chunks.recordId`
+   - `Chunks.primaryKey`
    - `Chunks.fieldName`
-   - `Chunks.contentHash`
+   - `Chunks.originalContent`
+   - `Chunks.content`
    - `Chunks.embeddingId`
    - `Embeddings.id`
    - `Embeddings.embedding`
-   - `source_lsn`
-   - `source_updated_at`
-   - `status`
-4. Tạo unique constraint theo khóa logic của chunk để upsert an toàn:
-   - `tableName + recordId + fieldName + contentHash`
-5. Với trường hợp dedupe theo content giữa nhiều record, cho phép nhiều dòng `Chunks` cùng `tableName + fieldName + contentHash` nhưng khác `recordId` và `id`.
+4. Tạo thêm bảng trạng thái record riêng để giữ version kể cả khi `Chunks` đã bị xóa:
+   ```sql
+   CREATE TABLE rag_record_state (
+       table_name text NOT NULL,
+       primary_key text NOT NULL,
+       last_sequence text NOT NULL,
+       last_lsn bigint NULL,
+       last_op text NOT NULL,
+       is_deleted boolean NOT NULL DEFAULT false,
+       updated_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY (table_name, primary_key)
+   );
+   ```
+   - `rag_record_state` là nguồn sự thật cho version/idempotency của từng record;
+   - `Chunks` có thể bị xóa khi `delete`, nhưng state của record không được mất;
+   - nếu chỉ giữ version trong `Chunks` thì duplicate của một event cũ sẽ không có gì để so sánh sau khi record bị xóa. Ví dụ: xét trường hợp sau:
+      - event 1: update record A
+      - event 2: xóa record A
+      - event 3: event 1 bị duplicated -> lúc này do event 2 làm mất lsn được lưu trong bảng Chunks khiến cho app tưởng phải tạo mới record A, trong khi thực tế là đã delete
+   - `rag_record_state` giải quyết đúng case `update -> delete -> duplicate update`, vì state vẫn còn để skip event cũ.
+5. Tạo unique constraint theo khóa logic của chunk để upsert an toàn:
+   - `tableName + primaryKey + fieldName + originalContent + content`
+6. Với trường hợp dedupe theo content giữa nhiều record, cho phép nhiều dòng `Chunks` cùng `tableName + fieldName + content` nhưng khác `primaryKey` và `id`.
 
 Deliverable: schema vector store và chiến lược upsert.
 
@@ -118,7 +136,9 @@ Deliverable: schema vector store và chiến lược upsert.
 - end transaction
 
 2. Định nghĩa versioning rule:
-     - CDC `LSN` là nguồn sự thật cuối cùng cho ordering.
+     - CDC `source.sequence` là nguồn sự thật cuối cùng cho ordering/idempotency;
+     - `source.lsn` chỉ còn là metadata audit/debug, vì một `lsn` có thể xuất hiện cho nhiều event trong cùng transaction;
+     - khi so sánh version, dùng `sequence` thay vì chỉ dùng `lsn`.
 
 3. Refactor `chunkingService.ts` theo rule mới:
     - bỏ toàn bộ logic preprocess markdown/HTML cũ.
@@ -188,113 +208,190 @@ Deliverable: RAG chain chạy được với LangChain và có thể thay retrie
 Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20hybridSearch.md)
 ---
 
-## 7. Thiết kế CDC mức thấp với `pg-logical-replication`
+## 7. Thiết kế CDC với Debezium
 
-1. Tạo bảng checkpoint CDC:
+1. Dùng **Debezium PostgreSQL Connector** làm nguồn CDC, không dùng `pg-logical-replication` trong app:
+   - app không đọc WAL trực tiếp;
+   - Debezium quản lý replication slot, publication, offset, schema history;
+   - app chỉ consume event từ topic Debezium.
+2. Bật cấu hình PostgreSQL cần cho Debezium:
+   - `wal_level = logical`;
+   - `max_replication_slots` đủ cho connector;
+   - `max_wal_senders` đủ cho connector;
+   - user Debezium có quyền replication và quyền đọc các bảng trong phạm vi RAG.
+3. Tạo connector chỉ theo dõi các bảng/cột nằm trong phạm vi RAG:
+   - dùng include list cho schema/table;
+   - loại các bảng không support RAG ngay từ connector nếu có thể;
+   - vẫn validate lại allowlist ở app để tránh index nhầm khi cấu hình connector thay đổi.
+4. Chuẩn hóa envelope event Debezium trước khi đưa vào pipeline nội bộ:
+   - `source.lsn`;
+   - `source.txId`;
+   - `source.sequence`;
+   - `source.schema`;
+   - `source.table`;
+   - primary key;
+   - `op` (`c`, `u`, `d`, `r`);
+   - `before`;
+   - `after`;
+   - `ts_ms`;
+   - snapshot marker nếu event đến từ snapshot.
+5. App consume Debezium topic theo consumer group riêng cho RAG indexer:
+   - commit Kafka offset chỉ sau khi xử lý xong event thành công;
+   - nếu event lỗi thì ghi log, đưa stream key vào `blockedStreams`, và không commit Kafka offset của event đó;
+   - không dùng offset Kafka thay thế hoàn toàn `sequence` trong dữ liệu đích, vì ordering/idempotency vẫn phải dựa trên `source.sequence`;
+6. Debezium đã key event theo từng row mặc định, nên không cần thêm bước tự set Kafka message key trong app:
+   - giữ key mặc định của Debezium để tránh cấu hình thừa;
+   - consumer vẫn hiểu stream theo từng row/record như Debezium phát ra;
+   - nếu sau này cần đổi key strategy thì chỉ làm khi có lý do kỹ thuật rõ ràng.
+7. Kafka topic phải được tạo/khai báo với **3 partitions ngay từ đầu**:
+   - số partition là cấu hình hạ tầng của topic, không phụ thuộc số lượng `{tableName}-{primaryKey}`;
+   - key theo row chỉ quyết định record nào vào partition nào, không quyết định tổng số partition;
+   - consumer xử lý song song trên 3 partition này, còn ordering/idempotency vẫn dựa vào `source.sequence`.
+   - trong server.ts có thể gọi hàm này trong quá trình start app, cứ mỗi lần muốn đổi số partition thì cứ đổi numOfP thôi:
+      ```
+      async function changeKafkaPartition(numOfP: number) {
+         if(numOfP === currentNumOfP)  return;
+         await turn_off_debezium() // để không gửi event qua kafka nữa
+         await wait_until_all_partitions_go_blank()
+         await change_kafka_config()
+         await turn_on_debezium()
+      }
+      ```
+8. Tạo bảng trạng thái tối thiểu cho app:
    ```sql
-   CREATE TABLE cdc_state (
-       id int PRIMARY KEY,
-       processed_lsn pg_lsn NULL
+   CREATE TABLE rag_cdc_state (
+       topic text NOT NULL,
+       partition int NOT NULL,
+       committed_offset bigint NOT NULL,
+       last_processed_sequence text NULL,
+       last_processed_lsn bigint NULL,
+       updated_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY (topic, partition)
    );
    ```
-   - `processed_lsn` phải nullable để phân biệt trạng thái chưa bootstrap với trạng thái đã chạy CDC.
-2. Bật logical replication cho DB nguồn(chỉnh wal_level = logical, max_replication_slots = 1, max_wal_senders = 1). Tham số thứ 1 cần cho pg-logical-replication còn 2 tham số cuối là do chỉ có 1 consumer.
-3. Tạo replication slot và publication cho các bảng cần theo dõi.
-4. Khi ứng dụng khởi chạy, đọc `cdc_state.processed_lsn`:
-   - nếu `processed_lsn IS NULL` thì hiểu là chưa từng tạo snapshot và sync dữ liệu;
-   - khi đó phải tạo snapshot cho trạng thái DB hiện tại và sync toàn bộ các bảng trong phạm vi RAG;
-   - sau khi bootstrap xong, ghi `processed_lsn` về mốc LSN khởi tạo tương ứng để CDC bắt đầu từ ranh giới đó.
-5. Nếu `processed_lsn IS NOT NULL`, chạy CDC worker đọc WAL kể từ `processed_lsn`.
-6. Mỗi khi worker xử lý xong một `LSN` và sync xong dữ liệu tương ứng, phải cập nhật lại `cdc_state.processed_lsn`.
-7. Viết CDC worker dùng `pg-logical-replication` để đọc WAL changes.
-8. Bắt và xử lý đủ các loại event schema-change và data-change:
-    - `INSERT`
-    - `UPDATE`
-    - `DELETE`
-    - đổi tên bảng
-    - đổi tên trường
-    - xóa bảng
-    - xóa trường
-9. Khi đổi tên bảng hoặc trường:
-    - cập nhật mapping metadata của `Chunks.tableName` / `Chunks.fieldName`
-    - giữ nguyên `recordId`, `contentHash`, `embeddingId` nếu nội dung không đổi
-    - tạo alias mapping tạm thời giữa tên cũ và tên mới để replay/checkpoint không bị lệch
-10. Khi xóa bảng hoặc trường:
-    - xóa toàn bộ chunk liên quan
-    - nếu xóa trường thì chỉ xử lý các chunk có `fieldName` tương ứng
-    - nếu xóa bảng thì xử lý toàn bộ chunk của `tableName` đó
-11. Chỉ ACK event khi đã:
-     - parse xong,
-     - map xong,
-     - cập nhật `Chunks` và `Embeddings` xong,
-     - ghi checkpoint xong.
-12. Nếu xử lý fail giữa chừng, không ACK để event được redeliver.
+   - Kafka offset dùng để resume consumer;
+   - offset chỉ được cập nhật sau khi transaction ghi `Chunks`/`Embeddings` hoàn tất.
+9. Bắt và xử lý các loại event data-change:
+   - `c`: insert;
+   - `u`: update;
+   - `d`: delete;
+   - `r`: snapshot read.
+10. Schema-change không xử lý bằng cách tự parse WAL trong app:
+   - NOTE: Do hệ thống không dùng migration, cần nghĩ cách để xử lý việc đổi tên bảng hoặc trường.
+   - Debezium ghi schema history theo connector;
+   - thay đổi schema phải đi qua migration có kiểm soát;
+   - migration phải cập nhật RAG mapping metadata trước hoặc cùng lúc với thay đổi DB.
+11. Khi đổi tên bảng hoặc trường:
+   - cập nhật mapping metadata của `Chunks.tableName` / `Chunks.fieldName`;
+   - giữ nguyên `primaryKey`, `originalContent`, `content`, `embeddingId` nếu nội dung không đổi;
+   - tạo alias mapping tạm thời giữa tên cũ và tên mới để xử lý event cũ còn tồn trong topic;
+   - chỉ xóa alias sau khi chắc chắn consumer đã vượt qua offset/LSN cuối cùng dùng tên cũ.
+12. Khi xóa bảng hoặc trường:
+    - migration phải đánh dấu mapping là disabled trước;
+    - nếu xóa trường thì chỉ xóa chunk có `fieldName` tương ứng;
+    - nếu xóa bảng thì xóa toàn bộ chunk của `tableName` đó;
+    - cleanup embedding mồ côi theo rule ở mục 5.
+13. Mỗi event được chuyển thành danh sách field job nội bộ:
+    - các field job của cùng row được xử lý trong cùng transaction.
 
-Deliverable: CDC worker tối thiểu có checkpoint + ack đúng thời điểm.
+Deliverable: Debezium connector config + RAG CDC consumer consume theo key `{tableName}-{primaryKey}` và commit offset đúng thời điểm.
 
 ---
 
-## 8. Chống mất sự kiện và xử lý out-of-order
+## 8. Chống mất sự kiện, out-of-order và khóa theo key
+1. Với cùng `{tableName}-{primaryKey}`, worker phải xử lý theo thứ tự Kafka gửi trong partition và kiểm tra thêm `source.lsn`:
+   - event mới hơn không được ghi đè bởi event cũ hơn;
+   - event cũ hơn version đã lưu phải bị skip idempotently;
+   - khi một transaction có nhiều event cùng `lsn`, dùng `source.sequence` để phân biệt thứ tự và xác định event nào là bản mới hơn.
+2. Áp dụng rule ghi dữ liệu theo “last committed sequence wins”, không theo “task start time”.
+3. Xử lý async:
+   - Xử lý async cho các partition khác nhau, nhưng với mỗi partition thì xử lý tuần tự.
+4. Nếu một event fail:
+   - ghi log lỗi với raw Debezium event, normalized metadata, stack trace, `topic`, `partition`, `offset`, `lsn`, và stream key;
+   - không commit Kafka offset của event lỗi;
+   - dừng app lại.
 
-1. Mỗi event phải có:
-   - `lsn`
-   - `txid`
-   - `schema/table`
-   - `pk`
-   - `op`
-   - `commit_timestamp` nếu available.
-2. Tạo **per-entity ordering guard**:
-   - mọi update của cùng `doc_id` phải đi qua một hàng đợi/lock riêng.
-   - đảm bảo update của một entity được commit theo thứ tự LSN.
-3. Áp dụng rule ghi dữ liệu theo “last committed LSN wins”, không theo “task start time”.
-4. Nếu xử lý async:
-   - cho phép song song giữa các entity khác nhau,
-   - nhưng serialize các event cùng `doc_id`.
-5. Trước khi write, kiểm tra version hiện tại trong store:
-   - nếu event có `lsn` cũ hơn version đã lưu, bỏ qua.
-   - nếu event mới hơn, upsert.
-6. Khi một event làm thay đổi một field đã được chunk trước đó, worker phải xử lý theo khóa logic của chunk:
-   - match theo `tableName + recordId + fieldName + contentHash` để tránh ghi đè sai.
-   - chỉ xóa các chunk cũ cùng `tableName + recordId + fieldName` khi chunk đó thực sự không còn thuộc snapshot mới.
-
-Deliverable: cơ chế chống ghi đè sai thứ tự cho cùng một entity.
+Deliverable: cơ chế khóa theo `{tableName}-{primaryKey}`, chống stale write và không chặn toàn bộ pipeline khi một record stream lỗi.
 
 ---
 
-## 9. Chiến lược ACK an toàn
+## 9. Chiến lược commit offset, retry và DLQ
 
-1. ACK chỉ sau khi transaction nội bộ hoàn tất.
-2. Nếu lưu nhiều document từ một event, coi đó là một unit of work.
-3. Checkpoint phải phản ánh event đã xử lý xong, không phải event đã đọc được.
-4. Nếu crash sau khi write nhưng trước ACK:
-   - event sẽ được replay,
+1. Với Debezium, “ACK” của app tương ứng với **commit Kafka offset** của consumer.
+2. Chỉ commit offset sau khi:
+   - parse event xong;
+   - map sang field job xong;
+   - cập nhật `Chunks` và `Embeddings` xong;
+   - cập nhật `rag_record_state` xong.
+3. Không commit offset cho event lỗi:
+   - event lỗi được giữ lại trong Kafka bằng cách không commit offset;
+   - app log lý do lỗi và stop app.
+4. Retry chính là redelivery từ Kafka:
+   - khi app restart hoặc consumer rebalance, Kafka gửi lại offset chưa commit;
+   - event được xử lý lại từ đầu và vẫn đi qua idempotency/`lastSequence` check.
+5. DLQ không phải luồng mặc định cho lỗi xử lý event(Tức là không dùng DLQ):
+   - chỉ dùng DLQ nếu có quyết định vận hành riêng cho event không thể xử lý nhưng vẫn muốn tiến offset;
+   - nếu ghi DLQ và commit offset thì phải được coi là ngoại lệ có kiểm soát, không phải behavior mặc định;
+   - mặc định của plan này là giữ event lỗi bằng Kafka offset chưa commit để không mất dữ liệu.
+6. Nếu crash sau khi write nhưng trước commit offset:
+   - event sẽ được Kafka redeliver;
    - write phải idempotent để không tạo bản ghi lỗi.
+7. Checkpoint/offset phải phản ánh event đã xử lý xong thành công, không phải event chỉ mới đọc được hoặc đã bị skip vì đang blocked.
+8. Cần cấu hình consumer để tránh commit tự động:
+   - tắt auto commit;
+   - commit thủ công sau transaction DB thành công;
+   - nếu dùng KafkaJS/NestJS wrapper thì phải kiểm tra rõ API pause/resume/commit offset để không vô tình ack message lỗi.
 
-Deliverable: semantics at-least-once an toàn, không mất event.
+Deliverable: semantics at-least-once an toàn, khóa lỗi theo `{tableName}-{primaryKey}`, không commit offset cho event lỗi.
 
 ---
 
-## 10. Backfill và bootstrap
+## 10. Incremental Snapshot và bootstrap bằng Debezium (TO-DO: Chỉ implement khi muốn re-index lại chunk từ đầu bằng cách yêu cầu Debezium tạo snapshot)
 
-1. Trước khi backfill, bật logical replication và chốt một `start_lsn` làm ranh giới đồng bộ giữa snapshot và delta.
-2. Tại thời điểm bắt đầu backfill, mở một transaction nhất quán để **exported snapshot** của DB tại đúng thời điểm đó.
-3. Backfill có thể chạy qua nhiều transaction con theo batch, nhưng **mỗi transaction con phải import cùng exported snapshot này trước khi đọc dữ liệu** để luôn nhìn thấy đúng “ảnh chụp cũ” của DB.
-4. Khi backfill chạy với exported snapshot, người dùng vẫn có thể update dữ liệu bình thường; các thay đổi này **không làm lệch dữ liệu backfill** vì mỗi batch đều đọc theo cùng một snapshot đã export.
-5. Những update/insert/delete phát sinh trong lúc backfill sẽ tiếp tục đi vào **WAL** và được CDC xử lý sau từ `start_lsn`.
-6. Chunking và embed là xử lý ở tầng code ngoài transaction DB:
-   - transaction chỉ dùng để đọc snapshot nhất quán từ DB nguồn
-   - sau khi đọc ra dữ liệu, code mới chunk, embed, rồi ghi thẳng sang bảng đích (`Chunks`/`Embeddings`)
-   - như vậy chunking không nằm trong query, nhưng vẫn được thực hiện trên dữ liệu đọc từ snapshot cũ
-7. Backfill phải chạy async theo batch và ghi thẳng sang bảng đích (`Chunks`/`Embeddings`) theo cùng quy tắc idempotent/upsert.
-8. Sau khi backfill xong, ghi checkpoint khởi tạo tại `start_lsn` hoặc mốc tương đương để CDC bắt đầu replay delta từ đúng ranh giới đó.
-9. Từ checkpoint khởi tạo trở đi, CDC xử lý các event phát sinh sau snapshot theo thứ tự `LSN`.
-10. Backfill cần chunk/batch để tránh load lớn và phải hỗ trợ resume bằng checkpoint tiến độ riêng:
-   - lưu `backfill_checkpoint` theo mức `tableName + lastProcessedPk` hoặc `tableName + offset`
-   - mỗi batch xử lý xong mới cập nhật checkpoint
-   - khi restart thì đọc lại checkpoint cuối cùng và tiếp tục từ batch kế tiếp
-   - các upsert phải idempotent để nếu batch cuối bị chạy lại cũng không tạo dữ liệu sai
+1. Dùng **Debezium Incremental Snapshot** thay cho backfill tự quản bằng exported snapshot:
+   - Debezium chia dữ liệu thành nhiều chunk nhỏ;
+   - app nhận snapshot event như event bình thường (`op = r`);
+   - dữ liệu snapshot và WAL mới được đan xen an toàn bằng cơ chế watermarking của Debezium.
+2. Bật signal table hoặc signaling channel cho Debezium để trigger incremental snapshot theo bảng:
+   - app/admin gửi signal snapshot cho các bảng trong phạm vi RAG;
+   - có thể snapshot lại một bảng hoặc một nhóm bảng mà không dừng CDC.
+3. Cấu hình chunk size phù hợp:
+   - chunk nhỏ để tránh giữ transaction/read quá lâu;
+   - chunk đủ lớn để giảm overhead;
+   - có thể tune riêng theo bảng lớn/nhỏ.
+4. Debezium watermarking đảm bảo:
+   - snapshot đọc theo từng khoảng khóa chính;
+   - WAL event phát sinh trong lúc snapshot vẫn được capture;
+   - event snapshot cũ không ghi đè event WAL mới hơn nhờ `source.sequence` và `lastSequence` check ở app.
+5. App xử lý snapshot event và streaming event chung một pipeline:
+   - đều đi qua document builder;
+   - đều đi qua chunking + embedding writer;
+   - đều dùng idempotent upsert và “last committed sequence wins”.
+6. Khi bootstrap lần đầu:
+   - tạo Debezium connector;
+   - cho connector bắt đầu stream WAL;
+   - trigger incremental snapshot cho các bảng RAG;
+   - app consume cả `r/c/u/d` event và build index dần.
+7. Không cần ghi checkpoint khởi tạo kiểu `start_lsn` trong app:
+   - Debezium quản lý offset và snapshot progress;
+   - app vẫn lưu `rag_record_state` để audit, idempotency và resume nội bộ.
+8. Nếu snapshot bị gián đoạn:
+   - Debezium resume từ offset/snapshot progress đã lưu;
+   - app vẫn idempotent nếu nhận lại event;
+9. Chunking và embed vẫn là xử lý ở tầng code:
+   - Debezium chỉ cung cấp row-level event;
+   - code mới build document, chunk, embed, rồi ghi vào `Chunks`/`Embeddings`;
+   - transaction ghi đích phải nhỏ, theo event `{tableName}-{primaryKey}` hoặc batch nhỏ có rollback rõ ràng.
+10. Với bảng rất lớn, cho phép chạy incremental snapshot theo từng đợt:
+   - trigger theo bảng ưu tiên;
+   - theo dõi lag, số stream đang blocked, throughput embedding;
+   - tạm pause/resume snapshot nếu hệ thống embedding hoặc DB đích quá tải.
+11. Vì incremental snapshot chia dữ liệu thành các khối nhỏ:
+   - không cần tự viết backfill đọc toàn bảng bằng exported snapshot;
+   - snapshot chunk được đan xen với WAL mới thông qua thuật toán watermarking của Debezium;
+    - app chỉ cần đảm bảo idempotency, `lastSequence` guard, và commit offset sau khi xử lý thành công.
 
-Deliverable: script bootstrap index từ DB hiện có.
+Deliverable: cấu hình Debezium incremental snapshot + pipeline bootstrap index bằng snapshot event có watermarking.
 
 ---
 
@@ -313,19 +410,20 @@ Deliverable: script bootstrap index từ DB hiện có.
 - Refactor `retrievalService.ts` sang Drizzle query builder.
 - Xây dựng một query duy nhất cho hybrid search, grouping, ordering, pagination.
 
-### Phase 4: Backfill
-- Build script nạp toàn bộ data từ Postgres.
+### Phase 4: Incremental Snapshot
+- Cấu hình Debezium incremental snapshot cho các bảng RAG.
+- Xử lý snapshot event chung pipeline với streaming event.
 - Đảm bảo idempotent upsert.
 
 ### Phase 5: CDC
-- Bật logical replication.
-- Viết CDC worker với ack sau xử lý.
-- Thêm checkpoint store.
+- Bật Debezium PostgreSQL Connector.
+- Viết RAG CDC consumer với commit offset sau xử lý.
+- Thêm `rag_cdc_state` / `rag_record_state`.
 
 ### Phase 6: Ordering + resilience
-- Áp per-entity serialization.
-- Chặn stale write theo LSN/version.
-- Thêm retry/DLQ/metrics.
+- Áp khóa theo `{tableName}-{primaryKey}`.
+- Chặn stale write theo `sequence`/version.
+- Thêm `blockedStreams`, logging lỗi, metrics, và manual recovery flow.
 
 ### Phase 7: Tối ưu
 - Benchmark embedding/retrieval.
@@ -338,6 +436,6 @@ Deliverable: script bootstrap index từ DB hiện có.
 - RAG không phụ thuộc LangChain orchestration.
 - Embedding local đa ngôn ngữ hoạt động ổn định.
 - Dữ liệu RAG lấy từ các bảng PostgreSQL đã chốt.
-- CDC cập nhật tự động qua `pg-logical-replication`.
-- ACK chỉ sau khi xử lý xong event.
+- CDC cập nhật tự động qua Debezium PostgreSQL Connector.
+- Kafka offset chỉ commit sau khi xử lý xong event thành công.
 - Không xảy ra stale overwrite khi event đến out-of-order.
