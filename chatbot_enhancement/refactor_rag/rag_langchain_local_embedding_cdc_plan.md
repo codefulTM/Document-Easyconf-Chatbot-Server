@@ -110,29 +110,42 @@ Deliverable: schema vector store và chiến lược upsert.
 
 ---
 
-## 5. Thiết kế pipeline build document từ DB
-
-1. Khi chunking value của một field trong một bảng, áp dụng pipeline sau:
+## 5. Thiết kế pipeline build document trong `Chunks` từ DB(xử lý sự kiện c + r + u + d)
+NOTE: Nếu một sự kiện có `sequence` bị outdated so với `rag_record_state` -> skip event
+### Sự kiện r(read), c(create), u(update): chạy cùng một luồng
+- lấy data trong `after`
+- xác định `tableName`, `primaryKey` mà sự kiện đang ảnh hưởng
 - start transaction
-   - value là null/undefined -> xem như value bị xóa -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey` + cleanup các embedding mồ côi(nếu không bị chunk nào khác refer tới).
-   - cast value thành `stringValue`.
-   - `stringValue` rỗng -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey` + cleanup các embedding mồ côi(nếu không bị chunk nào khác refer tới).
-   - Xét các chunk có cùng `tableName`, `fieldName`, `primaryKey`(1)
-      - if `originalContent` === `stringValue`: bỏ qua
-      - else (`originalContent` !== `stringValue`): có thay đổi về value -> xử lý như sau:
-         - xóa embedding mỗi chunk đang sử dụng KHI VÀ CHỈ KHI embedding đang không được sử dụng bởi chunk nào khác
-         - xóa chunk có cùng `tableName`, `fieldName`, `primaryKey`
-   - Tìm tập chunk có cùng `tableName`, `fieldName`, khác `primaryKey`:
-      - có `originalContent` === `stringValue`:
-         - clone ra thêm các chunk có cùng nội dung nhưng đổi `primaryKey`, `id`. 
-         - mục đích là để khỏi chunking, khỏi lấy embedding mà vẫn có nội dung.
-         - return.
-   - thêm vào các chunk có cùng `tableName`, `fieldName`, `primaryKey` và `originalContent` mới = `stringValue`:
-      - cắt `stringValue` thành các chunk -> `content`
-      - tìm 1 chunk có cùng `content` và `embeddingId` != null
-      - nếu có `embeddingId` -> tái sử dụng `embeddingId`. 
-      - nếu không, lấy embedding cho mỗi chunk rồi thêm vào `Embeddings`
-      - thêm mới chunk
+   - foreach `fieldName` trong `after`, nếu `fieldName` có trong `embeddingFields`(các field có hỗ trợ embedding):
+      - lấy value của field
+         - value là null/undefined -> xem như value bị xóa -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey` + cleanup các embedding mồ côi(nếu không bị chunk nào khác refer tới). -> continue;
+         - cast value thành `stringValue`.
+         - `stringValue` rỗng -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey` + cleanup các embedding mồ côi(nếu không bị chunk nào khác refer tới). -> continue;
+         - Tìm toàn bộ các chunk có cùng `tableName`, `fieldName`, `primaryKey`, `originalContent` !== `stringValue`(originalContent bị lỗi thời)
+            - xóa embedding mỗi chunk đang sử dụng KHI VÀ CHỈ KHI embedding đang không được sử dụng bởi chunk nào khác
+            - xóa các chunk này.
+         - Tìm 1 chunk có cùng `tableName`, `fieldName`, `primaryKey`, `originalContent` === `stringValue`.
+            - Nếu có: continue; (tới đây là đã xong thao tác cập nhật dữ liệu trong trường hợp dữ liệu đã có sẵn. đây là trường hợp mà event bị duplicated nhưng app vẫn xử lý vì một lý do nào đó, mà thôi cứ xét luôn cho chắc).
+         - Tìm tất cả các chunk có cùng `tableName`, `fieldName`, khác `primaryKey` với `primaryKey` của event hiện tại nhưng cùng `primaryKey` với nhau, có `originalContent` === `stringValue`
+            - clone ra thêm các chunk có cùng giá trị các trường trong `Chunks` nhưng đổi `primaryKey`, `id`. 
+            - mục đích là để khỏi chunking, khỏi lấy embedding mà vẫn có nội dung.
+            - continue(tới đây là đã xong thao tác cập nhật dữ liệu, nhưng chỉ trong trường hợp tồn tại ít nhất 1 chunk này)
+         - Thêm vào các chunk có cùng `tableName`, `fieldName`, `primaryKey` và `originalContent` mới = `stringValue`:
+            - cắt `stringValue` thành các chunk -> `content`
+            - tìm 1 chunk có cùng `content` và `embeddingId` != null
+            - nếu có `embeddingId` -> tái sử dụng `embeddingId`. 
+            - nếu không, lấy embedding cho mỗi chunk rồi thêm vào `Embeddings`
+            - thêm mới chunk
+   - update vào `rag_record_state`: cập nhật lại `sequence` của record = `sequence` của sự kiện này.
+- end transaction
+### Sự kiện d(delete)
+- lấy data trong `before`
+- xác định `tableName`, `primaryKey` mà sự kiện đang ảnh hưởng
+- xác định `sequence` của sự kiện
+- start transaction
+   - xóa các embedding trong `Embeddings` chỉ được liên kết với 1 chunk duy nhất và chunk đó là chunk có cùng `tableName` và `primaryKey` mà sự kiện đang ảnh hưởng
+   - xóa các chunk trong `Chunks` có cùng `tableName` và `primaryKey` mà sự kiện đang ảnh hưởng
+   - update vào `rag_record_state`: cập nhật lại `sequence` của record = `sequence` của sự kiện này.
 - end transaction
 
 2. Định nghĩa versioning rule:
@@ -257,7 +270,7 @@ Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20
          await turn_on_debezium()
       }
       ```
-8. Tạo bảng trạng thái tối thiểu cho app:
+<!-- 8. Tạo bảng trạng thái tối thiểu cho app:
    ```sql
    CREATE TABLE rag_cdc_state (
        topic text NOT NULL,
@@ -270,7 +283,7 @@ Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20
    );
    ```
    - Kafka offset dùng để resume consumer;
-   - offset chỉ được cập nhật sau khi transaction ghi `Chunks`/`Embeddings` hoàn tất.
+   - offset chỉ được cập nhật sau khi transaction ghi `Chunks`/`Embeddings` hoàn tất. -->
 9. Bắt và xử lý các loại event data-change:
    - `c`: insert;
    - `u`: update;
