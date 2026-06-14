@@ -95,9 +95,10 @@ Deliverable: schema vector store và chiến lược upsert.
 ## 5. Thiết kế pipeline build document từ DB
 
 1. Khi chunking value của một field trong một bảng, áp dụng pipeline sau:
-   - value là null/undefined -> xem như value bị xóa -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey`
+- start transaction
+   - value là null/undefined -> xem như value bị xóa -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey` + cleanup các embedding mồ côi(nếu không bị chunk nào khác refer tới).
    - cast value thành `stringValue`.
-   - `stringValue` rỗng -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey`.
+   - `stringValue` rỗng -> Xóa các chunk có cùng `tableName`, `fieldName`, `primaryKey` + cleanup các embedding mồ côi(nếu không bị chunk nào khác refer tới).
    - Xét các chunk có cùng `tableName`, `fieldName`, `primaryKey`(1)
       - if `originalContent` === `stringValue`: bỏ qua
       - else (`originalContent` !== `stringValue`): có thay đổi về value -> xử lý như sau:
@@ -110,10 +111,12 @@ Deliverable: schema vector store và chiến lược upsert.
          - return.
    - thêm vào các chunk có cùng `tableName`, `fieldName`, `primaryKey` và `originalContent` mới = `stringValue`:
       - cắt `stringValue` thành các chunk -> `content`
-      - lấy embedding cho mỗi chunk
-      - nếu có embedding có similarity >= 90% trong `Embeddings` rồi -> tái sử dụng embeddingId. nếu không -> thêm mới embedding
+      - tìm 1 chunk có cùng `content` và `embeddingId` != null
+      - nếu có `embeddingId` -> tái sử dụng `embeddingId`. 
+      - nếu không, lấy embedding cho mỗi chunk rồi thêm vào `Embeddings`
       - thêm mới chunk
-               
+- end transaction
+
 2. Định nghĩa versioning rule:
      - CDC `LSN` là nguồn sự thật cuối cùng cho ordering.
 
@@ -295,23 +298,7 @@ Deliverable: script bootstrap index từ DB hiện có.
 
 ---
 
-## 11. Observability và vận hành
-
-1. Ghi log theo `doc_id`, `lsn`, `txid`, `event_type`, `duration_ms`.
-2. Thêm metrics:
-   - event lag
-   - processing latency
-   - retry count
-   - dropped stale event count
-   - vector upsert success/fail
-3. Có dead-letter path cho event lỗi parse/hệ thống.
-4. Có cơ chế replay từ checkpoint khi cần rebuild index.
-
-Deliverable: dashboard/metrics tối thiểu cho CDC và RAG pipeline.
-
----
-
-## 12. Kế hoạch triển khai theo phase
+## 11. Kế hoạch triển khai theo phase
 
 ### Phase 1: Nền tảng
 - Chọn embedding model local.
