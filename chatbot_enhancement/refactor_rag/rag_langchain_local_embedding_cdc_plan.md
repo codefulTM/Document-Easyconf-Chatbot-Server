@@ -102,7 +102,7 @@ Deliverable: schema vector store và chiến lược upsert.
       - if `originalContent` === `stringValue`: bỏ qua
       - else (`originalContent` !== `stringValue`): có thay đổi về value -> xử lý như sau:
          - xóa embedding mỗi chunk đang sử dụng KHI VÀ CHỈ KHI embedding đang không được sử dụng bởi chunk nào khác
-         - xóa chunk có cùng `tableName`, `fieldName`, `originalContent` !== `stringValue`, cùng `primaryKey`
+         - xóa chunk có cùng `tableName`, `fieldName`, `primaryKey`
    - Tìm tập chunk có cùng `tableName`, `fieldName`, khác `primaryKey`:
       - có `originalContent` === `stringValue`:
          - clone ra thêm các chunk có cùng nội dung nhưng đổi `primaryKey`, `id`. 
@@ -111,7 +111,7 @@ Deliverable: schema vector store và chiến lược upsert.
    - thêm vào các chunk có cùng `tableName`, `fieldName`, `primaryKey` và `originalContent` mới = `stringValue`:
       - cắt `stringValue` thành các chunk -> `content`
       - lấy embedding cho mỗi chunk
-      - nếu embedding có trong `Embeddings` rồi(hiếm nhma cứ kiểm cho chắc) -> tái sử dụng embeddingId. nếu không -> thêm mới embedding
+      - nếu có embedding có similarity >= 90% trong `Embeddings` rồi -> tái sử dụng embeddingId. nếu không -> thêm mới embedding
       - thêm mới chunk
                
 2. Định nghĩa versioning rule:
