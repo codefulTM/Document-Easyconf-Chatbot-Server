@@ -100,7 +100,7 @@ Deliverable: schema vector store và chiến lược upsert.
    - nếu tồn tại bản ghi trong `Chunks` có cùng `tableName`, `recordId`, `fieldName`, `contentHash` thì skip chunk đó.
    - nếu chunk có cùng `tableName`, `fieldName`, `contentHash` nhưng khác `recordId`, chỉ tạo thêm một dòng mới trong `Chunks` với `recordId` và `id` khác, còn lại giữ nguyên.
    - chunk nào không bị skip thì embed bằng local embedding model, lưu vector vào `Embeddings`, rồi lưu `embeddingId` tương ứng vào `Chunks`.
-   - sau khi xử lý xong field hiện tại, các chunk cũ cùng `tableName` + `recordId` + `fieldName` nhưng không còn xuất hiện ở lần chunk mới và cũng không được tạo mới trong đợt này thì xóa khỏi `Chunks`.
+   - sau khi xử lý xong field hiện tại, các chunk cũ cùng `tableName` + `recordId` + `fieldName` nhưng không còn xuất hiện ở lần chunk mới, cũng không được tạo mới trong đợt này và cũng không nằm trong đống chunk có sẵn bị skip thì xóa khỏi `Chunks`.
 2. Định nghĩa versioning rule:
      - CDC `LSN` là nguồn sự thật cuối cùng cho ordering.
 
