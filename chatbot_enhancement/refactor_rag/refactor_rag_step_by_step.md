@@ -1,0 +1,3 @@
+- Thay .env
+- Chạy script ../../../Easyconf-Chatbot-Server/generate-debezium-ssl-certs.ps1
+- Chạy docker compose up cho file ../../../Easyconf-Chatbot-Server/docker-compose.debezium.yml

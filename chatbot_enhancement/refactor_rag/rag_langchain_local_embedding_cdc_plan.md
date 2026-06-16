@@ -85,14 +85,13 @@ Deliverable: sơ đồ luồng dữ liệu và chuẩn định danh document.
 4. Tạo thêm bảng trạng thái record riêng để giữ version kể cả khi `Chunks` đã bị xóa:
    ```sql
    CREATE TABLE rag_record_state (
-       table_name text NOT NULL,
-       primary_key text NOT NULL,
-       last_sequence text NOT NULL,
-       last_lsn bigint NULL,
-       last_op text NOT NULL,
-       is_deleted boolean NOT NULL DEFAULT false,
-       updated_at timestamptz NOT NULL DEFAULT now(),
-       PRIMARY KEY (table_name, primary_key)
+      table_name text NOT NULL,
+      primary_key text NOT NULL,
+      last_lsn bigint NOT NULL,
+      last_op text NOT NULL,
+      is_deleted boolean NOT NULL DEFAULT false,
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (table_name, primary_key)
    );
    ```
    - `rag_record_state` là nguồn sự thật cho version/idempotency của từng record;
@@ -111,7 +110,7 @@ Deliverable: schema vector store và chiến lược upsert.
 ---
 
 ## 5. Thiết kế pipeline build document trong `Chunks` từ DB(xử lý sự kiện c + r + u + d)
-NOTE: Nếu một sự kiện có `sequence` bị outdated so với `rag_record_state` -> skip event
+NOTE: Nếu một sự kiện có `lsn` bị outdated so với `rag_record_state` -> skip event
 ### Sự kiện r(read), c(create), u(update): chạy cùng một luồng
 - lấy data trong `after`
 - xác định `tableName`, `primaryKey` mà sự kiện đang ảnh hưởng
@@ -136,22 +135,20 @@ NOTE: Nếu một sự kiện có `sequence` bị outdated so với `rag_record_
             - nếu có `embeddingId` -> tái sử dụng `embeddingId`. 
             - nếu không, lấy embedding cho mỗi chunk rồi thêm vào `Embeddings`
             - thêm mới chunk
-   - update vào `rag_record_state`: cập nhật lại `sequence` của record = `sequence` của sự kiện này.
+   - update vào `rag_record_state`: cập nhật lại `lsn` của record = `lsn` của sự kiện này.
 - end transaction
 ### Sự kiện d(delete)
 - lấy data trong `before`
 - xác định `tableName`, `primaryKey` mà sự kiện đang ảnh hưởng
-- xác định `sequence` của sự kiện
+- xác định `lsn` của sự kiện
 - start transaction
    - xóa các embedding trong `Embeddings` chỉ được liên kết với 1 chunk duy nhất và chunk đó là chunk có cùng `tableName` và `primaryKey` mà sự kiện đang ảnh hưởng
    - xóa các chunk trong `Chunks` có cùng `tableName` và `primaryKey` mà sự kiện đang ảnh hưởng
-   - update vào `rag_record_state`: cập nhật lại `sequence` của record = `sequence` của sự kiện này.
+   - update vào `rag_record_state`: cập nhật lại `lsn` của record = `lsn` của sự kiện này.
 - end transaction
 
 2. Định nghĩa versioning rule:
-     - CDC `source.sequence` là nguồn sự thật cuối cùng cho ordering/idempotency;
-     - `source.lsn` chỉ còn là metadata audit/debug, vì một `lsn` có thể xuất hiện cho nhiều event trong cùng transaction;
-     - khi so sánh version, dùng `sequence` thay vì chỉ dùng `lsn`.
+     - CDC `source.lsn` là nguồn sự thật cuối cùng cho ordering/idempotency.
 
 3. Refactor `chunkingService.ts` theo rule mới:
     - bỏ toàn bộ logic preprocess markdown/HTML cũ.
@@ -231,15 +228,39 @@ Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20
    - `wal_level = logical`;
    - `max_replication_slots` đủ cho connector;
    - `max_wal_senders` đủ cho connector;
+   - `max_slot_wal_keep_size` mặc định là -1 -> Không cần set. -1 nghĩa là Debezium có thể giữ WAL segment không giới hạn và khi còn giữ thì Postgre sẽ không xóa các segment này.
    - user Debezium có quyền replication và quyền đọc các bảng trong phạm vi RAG.
-3. Tạo connector chỉ theo dõi các bảng/cột nằm trong phạm vi RAG:
+3. Chuẩn bị hạ tầng Kafka/Connect:
+   - Kafka broker và Kafka Connect phải cùng network với DB nguồn và app; Note: Kafka broker hiểu nôm na là database chứa message, còn Kafka Connect là một process chạy connector. Cái Debezium bản chất là một connector chạy trong Kafka Connect. Nó là plugin của Kafka Connect.
+   - Kafka Connect phải load được Debezium PostgreSQL connector plugin;
+   - cấu hình các topic nội bộ của Kafka Connect: `config.storage.topic`, `offset.storage.topic`, `status.storage.topic`;
+   - cấu hình replication factor phù hợp môi trường dev/local;
+   - xác nhận Kafka Connect REST API hoạt động ổn định trước khi register connector.
+4. Tạo Kafka topic CDC với **3 partitions ngay từ đầu**:
+   - số partition là cấu hình hạ tầng của topic, không phụ thuộc số lượng `{tableName}-{primaryKey}`;
+   - key theo row chỉ quyết định record nào vào partition nào, không quyết định tổng số partition;
+   - không đổi số partition trong giai đoạn vận hành bình thường;
+   - nếu sau này cần đổi partition thì dùng TO-DO `changeKafkaPartition(numOfP)` trong `server.ts`.
+5. Tạo connector chỉ theo dõi các bảng/cột nằm trong phạm vi RAG:
    - dùng include list cho schema/table;
    - loại các bảng không support RAG ngay từ connector nếu có thể;
    - vẫn validate lại allowlist ở app để tránh index nhầm khi cấu hình connector thay đổi.
-4. Chuẩn hóa envelope event Debezium trước khi đưa vào pipeline nội bộ:
+6. Đăng ký connector qua Kafka Connect REST API:
+   - cấu hình `connector.class = io.debezium.connector.postgresql.PostgresConnector`;
+   - cấu hình `database.hostname`, `database.port`, `database.user`, `database.password`, `database.dbname`;
+   - cấu hình `topic.prefix`;
+   - cấu hình `plugin.name = pgoutput`;
+   - cấu hình `snapshot.mode` theo mục tiêu bootstrap hiện tại;
+   - nếu dùng signal table thì khai báo bảng signal ngay từ đầu;
+   - kiểm tra connector status phải là `RUNNING` trước khi bật consumer app.
+7. Xác nhận các quyền và bảng phục vụ Debezium:
+   - user Debezium phải có quyền `REPLICATION`;
+   - user Debezium phải có quyền `SELECT` trên các bảng RAG;
+   - nếu dùng signal table thì user Debezium cũng phải đọc được bảng đó;
+   - nếu Debezium tự tạo publication thì kiểm tra publication tương ứng đã được tạo đúng.
+8. Chuẩn hóa envelope event Debezium trước khi đưa vào pipeline nội bộ:
    - `source.lsn`;
    - `source.txId`;
-   - `source.sequence`;
    - `source.schema`;
    - `source.table`;
    - primary key;
@@ -248,18 +269,18 @@ Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20
    - `after`;
    - `ts_ms`;
    - snapshot marker nếu event đến từ snapshot.
-5. App consume Debezium topic theo consumer group riêng cho RAG indexer:
+9. App consume Debezium topic theo consumer group riêng cho RAG indexer:
    - commit Kafka offset chỉ sau khi xử lý xong event thành công;
-   - nếu event lỗi thì ghi log, đưa stream key vào `blockedStreams`, và không commit Kafka offset của event đó;
-   - không dùng offset Kafka thay thế hoàn toàn `sequence` trong dữ liệu đích, vì ordering/idempotency vẫn phải dựa trên `source.sequence`;
-6. Debezium đã key event theo từng row mặc định, nên không cần thêm bước tự set Kafka message key trong app:
+   - nếu event lỗi thì ghi log, và không commit Kafka offset của event đó và thoát ứng dụng;
+   - không dùng offset Kafka thay thế hoàn toàn `lsn` trong dữ liệu đích, vì ordering/idempotency vẫn phải dựa trên `source.lsn`;
+10. Debezium đã key event theo từng row mặc định, nên không cần thêm bước tự set Kafka message key trong app:
    - giữ key mặc định của Debezium để tránh cấu hình thừa;
    - consumer vẫn hiểu stream theo từng row/record như Debezium phát ra;
    - nếu sau này cần đổi key strategy thì chỉ làm khi có lý do kỹ thuật rõ ràng.
-7. Kafka topic phải được tạo/khai báo với **3 partitions ngay từ đầu**:
+11. Kafka topic phải được tạo/khai báo với **3 partitions ngay từ đầu**:
    - số partition là cấu hình hạ tầng của topic, không phụ thuộc số lượng `{tableName}-{primaryKey}`;
    - key theo row chỉ quyết định record nào vào partition nào, không quyết định tổng số partition;
-   - consumer xử lý song song trên 3 partition này, còn ordering/idempotency vẫn dựa vào `source.sequence`.
+   - consumer xử lý song song trên 3 partition này, còn ordering/idempotency vẫn dựa vào `source.lsn`.
    - trong server.ts có thể gọi hàm này trong quá trình start app, cứ mỗi lần muốn đổi số partition thì cứ đổi numOfP thôi:
       ```
       async function changeKafkaPartition(numOfP: number) {
@@ -270,43 +291,29 @@ Bắt buộc tham khảo: [params của hybridSearch](./params%20của%20hàm%20
          await turn_on_debezium()
       }
       ```
-<!-- 8. Tạo bảng trạng thái tối thiểu cho app:
-   ```sql
-   CREATE TABLE rag_cdc_state (
-       topic text NOT NULL,
-       partition int NOT NULL,
-       committed_offset bigint NOT NULL,
-       last_processed_sequence text NULL,
-       last_processed_lsn bigint NULL,
-       updated_at timestamptz NOT NULL DEFAULT now(),
-       PRIMARY KEY (topic, partition)
-   );
-   ```
-   - Kafka offset dùng để resume consumer;
-   - offset chỉ được cập nhật sau khi transaction ghi `Chunks`/`Embeddings` hoàn tất. -->
-9. Bắt và xử lý các loại event data-change:
+12. Bắt và xử lý các loại event data-change:
    - `c`: insert;
    - `u`: update;
    - `d`: delete;
-   - `r`: snapshot read.
-10. Schema-change không xử lý bằng cách tự parse WAL trong app:
-   - NOTE: Do hệ thống không dùng migration, cần nghĩ cách để xử lý việc đổi tên bảng hoặc trường.
-   - Debezium ghi schema history theo connector;
-   - thay đổi schema phải đi qua migration có kiểm soát;
-   - migration phải cập nhật RAG mapping metadata trước hoặc cùng lúc với thay đổi DB.
-11. Khi đổi tên bảng hoặc trường:
-   - cập nhật mapping metadata của `Chunks.tableName` / `Chunks.fieldName`;
-   - giữ nguyên `primaryKey`, `originalContent`, `content`, `embeddingId` nếu nội dung không đổi;
-   - tạo alias mapping tạm thời giữa tên cũ và tên mới để xử lý event cũ còn tồn trong topic;
-   - chỉ xóa alias sau khi chắc chắn consumer đã vượt qua offset/LSN cuối cùng dùng tên cũ.
-12. Khi xóa bảng hoặc trường:
+    - `r`: snapshot read.
+13. Schema-change không xử lý bằng cách tự parse WAL trong app(Bỏ):
+    - NOTE: Do hệ thống không dùng migration, cần nghĩ cách để xử lý việc đổi tên bảng hoặc trường.
+    - Debezium ghi schema history theo connector;
+    - thay đổi schema phải đi qua migration có kiểm soát;
+    - migration phải cập nhật RAG mapping metadata trước hoặc cùng lúc với thay đổi DB.
+14. Khi đổi tên bảng hoặc trường(Bỏ):
+    - cập nhật mapping metadata của `Chunks.tableName` / `Chunks.fieldName`;
+    - giữ nguyên `primaryKey`, `originalContent`, `content`, `embeddingId` nếu nội dung không đổi;
+    - tạo alias mapping tạm thời giữa tên cũ và tên mới để xử lý event cũ còn tồn trong topic;
+    - chỉ xóa alias sau khi chắc chắn consumer đã vượt qua offset/LSN cuối cùng dùng tên cũ.
+15. Khi xóa bảng hoặc trường(Bỏ):
     - migration phải đánh dấu mapping là disabled trước;
     - nếu xóa trường thì chỉ xóa chunk có `fieldName` tương ứng;
     - nếu xóa bảng thì xóa toàn bộ chunk của `tableName` đó;
     - cleanup embedding mồ côi theo rule ở mục 5.
-13. Mỗi event được chuyển thành danh sách field job nội bộ:
+16. Mỗi event được chuyển thành danh sách field job nội bộ:
     - các field job của cùng row được xử lý trong cùng transaction.
-
+<!-- Đang ở bước này -->
 Deliverable: Debezium connector config + RAG CDC consumer consume theo key `{tableName}-{primaryKey}` và commit offset đúng thời điểm.
 
 ---
@@ -315,16 +322,25 @@ Deliverable: Debezium connector config + RAG CDC consumer consume theo key `{tab
 1. Với cùng `{tableName}-{primaryKey}`, worker phải xử lý theo thứ tự Kafka gửi trong partition và kiểm tra thêm `source.lsn`:
    - event mới hơn không được ghi đè bởi event cũ hơn;
    - event cũ hơn version đã lưu phải bị skip idempotently;
-   - khi một transaction có nhiều event cùng `lsn`, dùng `source.sequence` để phân biệt thứ tự và xác định event nào là bản mới hơn.
-2. Áp dụng rule ghi dữ liệu theo “last committed sequence wins”, không theo “task start time”.
+    - `source.lsn` là căn cứ duy nhất để xác định thứ tự event.
+2. Áp dụng rule ghi dữ liệu theo “last committed lsn wins”, không theo “task start time”.
 3. Xử lý async:
    - Xử lý async cho các partition khác nhau, nhưng với mỗi partition thì xử lý tuần tự.
-4. Nếu một event fail:
-   - ghi log lỗi với raw Debezium event, normalized metadata, stack trace, `topic`, `partition`, `offset`, `lsn`, và stream key;
-   - không commit Kafka offset của event lỗi;
-   - dừng app lại.
+4. Với trường hợp các event đến từ **cùng một DB transaction** (ví dụ INSERT Conference rồi INSERT Session FK reference):
+    - Dùng transaction metadata topic (`<topicPrefix>.transaction`) để biết khi nào một transaction bắt đầu và kết thúc;
+    - Buffer tất cả DML events của cùng `transaction.id` vào bộ nhớ (Map<txId, DebeziumEvent[]>);
+    - Khi nhận END event với `event_count`, kiểm tra buffer[txId].length === event_count:
+        - Nếu đủ: sắp xếp events theo `total_order`, xử lý tuần tự trong transaction DB.
+        - Nếu thiếu (event chưa kịp tới): giữ buffer, đợi thêm.
+    - Buffer có timeout + cleanup (ví dụ 30s), tránh memory leak nếu END bị mất.
+5. Lưu ý: transaction metadata chỉ cần thiết khi có **FK dependency trong cùng transaction**.
+    - Các event không cùng transaction (row update riêng lẻ) xử lý bình thường, không qua buffer.
+6. Nếu một event fail:
+    - ghi log lỗi với raw Debezium event, normalized metadata, stack trace, `topic`, `partition`, `offset`, `lsn`, và stream key;
+    - không commit Kafka offset của event lỗi;
+    - dừng app lại.
 
-Deliverable: cơ chế khóa theo `{tableName}-{primaryKey}`, chống stale write và không chặn toàn bộ pipeline khi một record stream lỗi.
+Deliverable: cơ chế khóa theo `{tableName}-{primaryKey}`, chống stale write, buffer transaction để xử lý FK dependency, không chặn toàn bộ pipeline khi một record stream lỗi.
 
 ---
 
@@ -341,7 +357,7 @@ Deliverable: cơ chế khóa theo `{tableName}-{primaryKey}`, chống stale writ
    - app log lý do lỗi và stop app.
 4. Retry chính là redelivery từ Kafka:
    - khi app restart hoặc consumer rebalance, Kafka gửi lại offset chưa commit;
-   - event được xử lý lại từ đầu và vẫn đi qua idempotency/`lastSequence` check.
+   - event được xử lý lại từ đầu và vẫn đi qua idempotency/`lastLsn` check.
 5. DLQ không phải luồng mặc định cho lỗi xử lý event(Tức là không dùng DLQ):
    - chỉ dùng DLQ nếu có quyết định vận hành riêng cho event không thể xử lý nhưng vẫn muốn tiến offset;
    - nếu ghi DLQ và commit offset thì phải được coi là ngoại lệ có kiểm soát, không phải behavior mặc định;
@@ -375,11 +391,11 @@ Deliverable: semantics at-least-once an toàn, khóa lỗi theo `{tableName}-{pr
 4. Debezium watermarking đảm bảo:
    - snapshot đọc theo từng khoảng khóa chính;
    - WAL event phát sinh trong lúc snapshot vẫn được capture;
-   - event snapshot cũ không ghi đè event WAL mới hơn nhờ `source.sequence` và `lastSequence` check ở app.
+   - event snapshot cũ không ghi đè event WAL mới hơn nhờ `source.lsn` và `lastLsn` check ở app.
 5. App xử lý snapshot event và streaming event chung một pipeline:
    - đều đi qua document builder;
    - đều đi qua chunking + embedding writer;
-   - đều dùng idempotent upsert và “last committed sequence wins”.
+   - đều dùng idempotent upsert và “last committed lsn wins”.
 6. Khi bootstrap lần đầu:
    - tạo Debezium connector;
    - cho connector bắt đầu stream WAL;
@@ -402,7 +418,7 @@ Deliverable: semantics at-least-once an toàn, khóa lỗi theo `{tableName}-{pr
 11. Vì incremental snapshot chia dữ liệu thành các khối nhỏ:
    - không cần tự viết backfill đọc toàn bảng bằng exported snapshot;
    - snapshot chunk được đan xen với WAL mới thông qua thuật toán watermarking của Debezium;
-    - app chỉ cần đảm bảo idempotency, `lastSequence` guard, và commit offset sau khi xử lý thành công.
+    - app chỉ cần đảm bảo idempotency, `lastLsn` guard, và commit offset sau khi xử lý thành công.
 
 Deliverable: cấu hình Debezium incremental snapshot + pipeline bootstrap index bằng snapshot event có watermarking.
 
@@ -431,11 +447,11 @@ Deliverable: cấu hình Debezium incremental snapshot + pipeline bootstrap inde
 ### Phase 5: CDC
 - Bật Debezium PostgreSQL Connector.
 - Viết RAG CDC consumer với commit offset sau xử lý.
-- Thêm `rag_cdc_state` / `rag_record_state`.
+- Thêm `rag_record_state`.
 
 ### Phase 6: Ordering + resilience
 - Áp khóa theo `{tableName}-{primaryKey}`.
-- Chặn stale write theo `sequence`/version.
+- Chặn stale write theo `lsn`/version.
 - Thêm `blockedStreams`, logging lỗi, metrics, và manual recovery flow.
 
 ### Phase 7: Tối ưu
